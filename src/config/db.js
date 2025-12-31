@@ -9,13 +9,10 @@ console.log('Database configuration:', {
 });
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  user: process.env.DB_USER || 'u760925268_unilinks',
-  password: process.env.DB_PASSWORD || 'U760925268_unilinks',
-  database: process.env.DB_NAME || 'u760925268_unilinks',
-  port: parseInt(process.env.DB_PORT) || 3306,
+  uri: 'mysql://root:grWNxchRtVkzZFAMcgQzWnDzoyTafPjI@trolley.proxy.rlwy.net:12672/railway', // Railway will parse it automatically
   waitForConnections: true,
-  connectionLimit: 10
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
 // Test connection on startup
