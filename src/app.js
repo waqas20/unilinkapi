@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import authRoutes from './routes/auth.js';
 import leadRoutes from './routes/LeadRoutes.js';
+import counselorRoutes from './routes/CounselorRoutes.js';
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.use(express.urlencoded({ extended: true }));
 // Routes - IMPORTANT: No /api prefix here since .htaccess strips it
 app.use('/auth', authRoutes);
 app.use('/', leadRoutes);
+app.use('/', counselorRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
