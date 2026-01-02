@@ -1,8 +1,47 @@
 import express from 'express';
 import bcrypt from 'bcrypt';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 import pool from '../config/db.js';
 
 const router = express.Router();
+
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Configure multer for image uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, '../uploads/meeting-notes');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'meeting-note-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = /jpeg|jpg|png|gif|pdf/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image files (JPEG, JPG, PNG, GIF) and PDFs are allowed'));
+    }
+  }
+});
 
 // Validation helper functions
 const validateEmail = (email) => {
@@ -659,6 +698,31 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     
     const userId = userResult.insertId;
     
+    // Transfer counselor assignments from lead to student
+    const [assignedCounselors] = await connection.query(
+      'SELECT counselor_id FROM lead_counselor_assignments WHERE lead_id = ?',
+      [leadId]
+    );
+    
+    if (assignedCounselors.length > 0) {
+      const studentCounselorValues = assignedCounselors.map(c => [
+        userId, 
+        c.counselor_id, 
+        leadId
+      ]);
+      
+      await connection.query(
+        'INSERT INTO student_counselors (user_id, counselor_id, transferred_from_lead_id) VALUES ?',
+        [studentCounselorValues]
+      );
+    }
+    
+    // Update meetings to reference the new user instead of lead
+    await connection.query(
+      'UPDATE counselor_meetings SET user_id = ?, lead_id = NULL WHERE lead_id = ?',
+      [userId, leadId]
+    );
+    
     // Mark lead as registered
     await connection.query(
       'UPDATE leads SET is_registered = TRUE, registered_at = NOW() WHERE id = ?',
@@ -671,6 +735,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       success: true,
       message: 'Lead successfully registered as student',
       userId: userId,
+      counselorsTransferred: assignedCounselors.length,
       credentials: {
         email: lead.email,
         password: generatedPassword
@@ -683,6 +748,467 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'An error occurred while registering the student',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+
+// ============ COUNSELOR ASSIGNMENT ENDPOINTS ============
+
+// Get assigned counselors for a lead
+router.get('/leads/:leadId/counselors', async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    
+    const [counselors] = await pool.query(
+      `SELECT c.*, lca.assigned_at, lca.notes as assignment_notes
+       FROM counselors c
+       INNER JOIN lead_counselor_assignments lca ON c.id = lca.counselor_id
+       WHERE lca.lead_id = ?
+       ORDER BY lca.assigned_at DESC`,
+      [leadId]
+    );
+    
+    res.json({
+      success: true,
+      counselors: counselors
+    });
+    
+  } catch (error) {
+    console.error('Error fetching lead counselors:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch assigned counselors',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Assign counselor to lead
+router.post('/leads/:leadId/assign-counselor', async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { leadId } = req.params;
+    const { counselorId, notes } = req.body;
+    
+    if (!counselorId) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Counselor ID is required' 
+      });
+    }
+    
+    // Check if lead exists
+    const [lead] = await connection.query(
+      'SELECT id FROM leads WHERE id = ?',
+      [leadId]
+    );
+    
+    if (lead.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Lead not found' 
+      });
+    }
+    
+    // Check if counselor exists
+    const [counselor] = await connection.query(
+      'SELECT id FROM counselors WHERE id = ?',
+      [counselorId]
+    );
+    
+    if (counselor.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Counselor not found' 
+      });
+    }
+    
+    // Check if already assigned
+    const [existing] = await connection.query(
+      'SELECT id FROM lead_counselor_assignments WHERE lead_id = ? AND counselor_id = ?',
+      [leadId, counselorId]
+    );
+    
+    if (existing.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({ 
+        success: false, 
+        message: 'This counselor is already assigned to this lead' 
+      });
+    }
+    
+    // Assign counselor
+    await connection.query(
+      'INSERT INTO lead_counselor_assignments (lead_id, counselor_id, notes) VALUES (?, ?, ?)',
+      [leadId, counselorId, notes || null]
+    );
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Counselor assigned successfully'
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error assigning counselor:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while assigning counselor',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// Remove counselor assignment from lead
+router.delete('/leads/:leadId/counselors/:counselorId', async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { leadId, counselorId } = req.params;
+    
+    const [result] = await connection.query(
+      'DELETE FROM lead_counselor_assignments WHERE lead_id = ? AND counselor_id = ?',
+      [leadId, counselorId]
+    );
+    
+    if (result.affectedRows === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Assignment not found' 
+      });
+    }
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Counselor removed successfully'
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error removing counselor:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while removing counselor',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+
+// ============ MEETING ENDPOINTS ============
+
+// Get available time slots for a counselor on a specific date
+router.get('/counselors/:counselorId/available-slots', async (req, res) => {
+  try {
+    const { counselorId } = req.params;
+    const { date } = req.query;
+    
+    if (!date) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Date parameter is required' 
+      });
+    }
+    
+    // Get all meetings for the counselor on that date
+    const [meetings] = await pool.query(
+      `SELECT meeting_time, duration_minutes 
+       FROM counselor_meetings 
+       WHERE counselor_id = ? AND meeting_date = ? AND status != 'Cancelled'
+       ORDER BY meeting_time`,
+      [counselorId, date]
+    );
+    
+    // Convert meetings to time blocks
+    const bookedSlots = meetings.map(meeting => {
+      const [hours, minutes] = meeting.meeting_time.split(':');
+      const startMinutes = parseInt(hours) * 60 + parseInt(minutes);
+      const endMinutes = startMinutes + meeting.duration_minutes;
+      
+      return {
+        start: startMinutes,
+        end: endMinutes
+      };
+    });
+    
+    res.json({
+      success: true,
+      bookedSlots: bookedSlots
+    });
+    
+  } catch (error) {
+    console.error('Error fetching available slots:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch available slots',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Get meetings for a lead
+router.get('/leads/:leadId/meetings', async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    
+    const [meetings] = await pool.query(
+      `SELECT cm.*, c.name as counselor_name, c.counselor_id, c.email as counselor_email,
+              l.full_name as lead_name
+       FROM counselor_meetings cm
+       INNER JOIN counselors c ON cm.counselor_id = c.id
+       LEFT JOIN leads l ON cm.lead_id = l.id
+       WHERE cm.lead_id = ?
+       ORDER BY cm.meeting_date DESC, cm.meeting_time DESC`,
+      [leadId]
+    );
+    
+    res.json({
+      success: true,
+      meetings: meetings
+    });
+    
+  } catch (error) {
+    console.error('Error fetching lead meetings:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch meetings',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Schedule meeting for lead with counselor
+router.post('/leads/:leadId/meetings', async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { leadId } = req.params;
+    const { counselorId, meetingDate, meetingTime, durationMinutes, notes } = req.body;
+    
+    // Validate required fields
+    if (!counselorId || !meetingDate || !meetingTime || !durationMinutes) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'All required fields must be provided' 
+      });
+    }
+    
+    // Validate duration
+    if (durationMinutes < 15 || durationMinutes > 480) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Duration must be between 15 minutes and 8 hours' 
+      });
+    }
+    
+    // Check if counselor is assigned to this lead
+    const [assignment] = await connection.query(
+      'SELECT id FROM lead_counselor_assignments WHERE lead_id = ? AND counselor_id = ?',
+      [leadId, counselorId]
+    );
+    
+    if (assignment.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'This counselor is not assigned to this lead' 
+      });
+    }
+    
+    // Get lead info
+    const [lead] = await connection.query(
+      'SELECT full_name FROM leads WHERE id = ?',
+      [leadId]
+    );
+    
+    if (lead.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Lead not found' 
+      });
+    }
+    
+    // Check for time conflicts
+    const [hours, minutes] = meetingTime.split(':');
+    const startMinutes = parseInt(hours) * 60 + parseInt(minutes);
+    const endMinutes = startMinutes + parseInt(durationMinutes);
+    
+    // Validate business hours (9 AM to 5 PM = 540 to 1020 minutes)
+    if (startMinutes < 540 || endMinutes > 1020) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Meetings must be scheduled between 9:00 AM and 5:00 PM' 
+      });
+    }
+    
+    // Check for overlapping meetings
+    const [conflicts] = await connection.query(
+      `SELECT id, meeting_time, duration_minutes
+       FROM counselor_meetings
+       WHERE counselor_id = ? 
+       AND meeting_date = ? 
+       AND status != 'Cancelled'`,
+      [counselorId, meetingDate]
+    );
+    
+    for (const meeting of conflicts) {
+      const [mHours, mMinutes] = meeting.meeting_time.split(':');
+      const mStart = parseInt(mHours) * 60 + parseInt(mMinutes);
+      const mEnd = mStart + meeting.duration_minutes;
+      
+      // Check if there's an overlap
+      if ((startMinutes >= mStart && startMinutes < mEnd) ||
+          (endMinutes > mStart && endMinutes <= mEnd) ||
+          (startMinutes <= mStart && endMinutes >= mEnd)) {
+        await connection.rollback();
+        return res.status(409).json({ 
+          success: false, 
+          message: `This time slot conflicts with an existing meeting from ${meeting.meeting_time} (${meeting.duration_minutes} minutes)` 
+        });
+      }
+    }
+    
+    // Insert meeting
+    await connection.query(
+      `INSERT INTO counselor_meetings 
+       (counselor_id, lead_id, student_name, student_id, meeting_date, meeting_time, duration_minutes, status, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
+      [counselorId, leadId, lead[0].full_name, `LEAD-${leadId}`, meetingDate, meetingTime, durationMinutes, notes || null]
+    );
+    
+    await connection.commit();
+    
+    res.status(201).json({
+      success: true,
+      message: 'Meeting scheduled successfully'
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error scheduling meeting:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while scheduling the meeting',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// Update meeting notes and upload image (for counselors)
+router.put('/meetings/:meetingId/notes', upload.single('notesImage'), async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { meetingId } = req.params;
+    const { notes, status } = req.body;
+    const notesImage = req.file ? `/uploads/meeting-notes/${req.file.filename}` : null;
+    
+    // Check if meeting exists
+    const [meeting] = await connection.query(
+      'SELECT id, meeting_notes_image FROM counselor_meetings WHERE id = ?',
+      [meetingId]
+    );
+    
+    if (meeting.length === 0) {
+      await connection.rollback();
+      if (req.file) {
+        fs.unlinkSync(req.file.path); // Delete uploaded file
+      }
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Meeting not found' 
+      });
+    }
+    
+    // Delete old image if new one is uploaded
+    if (notesImage && meeting[0].meeting_notes_image) {
+      const oldImagePath = path.join(__dirname, '..', meeting[0].meeting_notes_image);
+      if (fs.existsSync(oldImagePath)) {
+        fs.unlinkSync(oldImagePath);
+      }
+    }
+    
+    // Build update query
+    let updateQuery = 'UPDATE counselor_meetings SET ';
+    let updateValues = [];
+    let updateFields = [];
+    
+    if (notes !== undefined) {
+      updateFields.push('notes = ?');
+      updateValues.push(notes);
+    }
+    
+    if (notesImage) {
+      updateFields.push('meeting_notes_image = ?');
+      updateValues.push(notesImage);
+    }
+    
+    if (status) {
+      updateFields.push('status = ?');
+      updateValues.push(status);
+    }
+    
+    if (updateFields.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No fields to update' 
+      });
+    }
+    
+    updateQuery += updateFields.join(', ') + ' WHERE id = ?';
+    updateValues.push(meetingId);
+    
+    await connection.query(updateQuery, updateValues);
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Meeting updated successfully',
+      notesImageUrl: notesImage
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    if (req.file) {
+      fs.unlinkSync(req.file.path); // Delete uploaded file on error
+    }
+    console.error('Error updating meeting notes:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while updating meeting notes',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {

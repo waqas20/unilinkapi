@@ -78,14 +78,44 @@ router.get('/counselors/:counselorId', async (req, res) => {
     
     // Get meetings for this counselor
     const [meetings] = await pool.query(
-      'SELECT * FROM counselor_meetings WHERE counselor_id = ? ORDER BY meeting_date DESC, meeting_time DESC',
+      `SELECT cm.*, 
+              COALESCE(l.full_name, u.name) as client_name,
+              COALESCE(CONCAT('LEAD-', l.id), CONCAT('STU-', u.id)) as client_id,
+              CASE WHEN l.id IS NOT NULL THEN 'lead' ELSE 'student' END as client_type
+       FROM counselor_meetings cm
+       LEFT JOIN leads l ON cm.lead_id = l.id
+       LEFT JOIN users u ON cm.user_id = u.id
+       WHERE cm.counselor_id = ? 
+       ORDER BY cm.meeting_date DESC, cm.meeting_time DESC`,
+      [counselorId]
+    );
+    
+    // Get assigned leads
+    const [leads] = await pool.query(
+      `SELECT l.id, l.full_name, l.email, l.phone, l.interest, lca.assigned_at
+       FROM leads l
+       INNER JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
+       WHERE lca.counselor_id = ? AND l.is_registered = FALSE
+       ORDER BY lca.assigned_at DESC`,
+      [counselorId]
+    );
+    
+    // Get assigned students
+    const [students] = await pool.query(
+      `SELECT u.id, u.name, u.email, sc.assigned_at
+       FROM users u
+       INNER JOIN student_counselors sc ON u.id = sc.user_id
+       WHERE sc.counselor_id = ?
+       ORDER BY sc.assigned_at DESC`,
       [counselorId]
     );
     
     res.json({
       success: true,
       counselor: counselors[0],
-      meetings: meetings
+      meetings: meetings,
+      assignedLeads: leads,
+      assignedStudents: students
     });
     
   } catch (error) {
@@ -449,5 +479,67 @@ router.delete('/counselors/:counselorId/meetings/:meetingId', async (req, res) =
     connection.release();
   }
 });
+
+
+// Get leads assigned to a counselor
+router.get('/counselors/:counselorId/leads', async (req, res) => {
+  try {
+    const { counselorId } = req.params;
+    
+    const [leads] = await pool.query(
+      `SELECT l.*, lca.assigned_at
+       FROM leads l
+       INNER JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
+       WHERE lca.counselor_id = ? AND l.is_registered = FALSE
+       ORDER BY lca.assigned_at DESC`,
+      [counselorId]
+    );
+    
+    res.json({
+      success: true,
+      leads: leads
+    });
+    
+  } catch (error) {
+    console.error('Error fetching counselor leads:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch assigned leads',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Get students assigned to a counselor (converted from leads)
+router.get('/counselors/:counselorId/students', async (req, res) => {
+  try {
+    const { counselorId } = req.params;
+    
+    const [students] = await pool.query(
+      `SELECT u.id, u.name, u.email, sc.assigned_at, sc.transferred_from_lead_id
+       FROM users u
+       INNER JOIN student_counselors sc ON u.id = sc.user_id
+       WHERE sc.counselor_id = ?
+       ORDER BY sc.assigned_at DESC`,
+      [counselorId]
+    );
+    
+    res.json({
+      success: true,
+      students: students
+    });
+    
+  } catch (error) {
+    console.error('Error fetching counselor students:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch assigned students',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+
+
 
 export default router;
