@@ -363,6 +363,9 @@ router.put('/students/:studentId', async (req, res) => {
     const trimmedEmail = email.trim().toLowerCase();
     const fullName = `${firstName.trim()} ${middleName ? middleName.trim() + ' ' : ''}${surname.trim()}`;
 
+    // Format date to YYYY-MM-DD
+    const formattedDob = dob.split('T')[0];
+
     // Check if student exists
     const [existingStudent] = await connection.query(
       'SELECT id FROM users WHERE id = ? AND role = ?',
@@ -399,7 +402,7 @@ router.put('/students/:studentId', async (req, res) => {
            guardian_mobile = ?, guardian_email = ?, source_inquiry = ?, status = ?
        WHERE id = ?`,
       [fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, mobile.trim(), 
-       address.trim(), country, dob, guardianName?.trim(), guardianRelation?.trim(), 
+       address.trim(), country, formattedDob, guardianName?.trim(), guardianRelation?.trim(), 
        guardianMobile?.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
        status || 'Active', studentId]
     );
@@ -416,8 +419,8 @@ router.put('/students/:studentId', async (req, res) => {
           studentId,
           edu.education_level,
           edu.institute_name,
-          edu.start_date,
-          edu.end_date || null,
+          edu.start_date.split('T')[0], // Format start date
+          edu.end_date ? edu.end_date.split('T')[0] : null, // Format end date
           edu.result || null,
           edu.remarks || null
         ]);
