@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import leadRoutes from './routes/LeadRoutes.js';
 import counselorRoutes from './routes/CounselorRoutes.js';
+import studentRoutes from './routes/StudentRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +29,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/auth', authRoutes);
 app.use('/', leadRoutes);
 app.use('/', counselorRoutes);
+app.use('/', studentRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
