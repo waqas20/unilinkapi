@@ -6,6 +6,7 @@ import authRoutes from './routes/auth.js';
 import leadRoutes from './routes/LeadRoutes.js';
 import counselorRoutes from './routes/CounselorRoutes.js';
 import studentRoutes from './routes/StudentRoutes.js';
+import visitorLogRoutes from './routes/VisitorLogRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +31,7 @@ app.use('/auth', authRoutes);
 app.use('/', leadRoutes);
 app.use('/', counselorRoutes);
 app.use('/', studentRoutes);
+app.use('/', visitorLogRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
