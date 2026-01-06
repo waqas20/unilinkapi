@@ -400,10 +400,9 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       : ' No changes were detected from your previous submission.';
     
     res.json({
-      success: true,
-      message: `Follow-up #${nextFollowUpNumber} recorded successfully!${changeMessage} We will contact you shortly.`,
-      followUpNumber: nextFollowUpNumber,
-      changesTracked: changes.length
+        success: true,
+        message: `Follow-up recorded successfully!`,
+        followUpNumber: nextFollowUpNumber
     });
     
   } catch (error) {
