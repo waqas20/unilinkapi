@@ -7,6 +7,7 @@ import leadRoutes from './routes/LeadRoutes.js';
 import counselorRoutes from './routes/CounselorRoutes.js';
 import studentRoutes from './routes/StudentRoutes.js';
 import visitorLogRoutes from './routes/VisitorLogRoutes.js';
+import countryRoutes from './routes/countryRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +33,7 @@ app.use('/', leadRoutes);
 app.use('/', counselorRoutes);
 app.use('/', studentRoutes);
 app.use('/', visitorLogRoutes);
+app.use('/', countryRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
