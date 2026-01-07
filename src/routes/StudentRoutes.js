@@ -527,6 +527,180 @@ router.delete('/students/:studentId', async (req, res) => {
   }
 });
 
+// ============ MANUAL FORM UPLOAD ============
+
+// Upload manual form for student
+router.post('/students/:studentId/manual-form', upload.single('manualForm'), async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { studentId } = req.params;
+    
+    if (!req.file) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No file uploaded' 
+      });
+    }
+    
+    // Check if student exists
+    const [student] = await connection.query(
+      'SELECT id, manual_form_path FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    
+    if (student.length === 0) {
+      await connection.rollback();
+      if (req.file) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Student not found' 
+      });
+    }
+    
+    // Delete old file if exists
+    if (student[0].manual_form_path) {
+      const oldFilePath = path.join(__dirname, '..', student[0].manual_form_path);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    
+    const filePath = `/uploads/student-documents/${req.file.filename}`;
+    
+    // Update student record with manual form path
+    await connection.query(
+      'UPDATE users SET manual_form_path = ?, manual_form_uploaded_at = NOW() WHERE id = ?',
+      [filePath, studentId]
+    );
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Manual form uploaded successfully',
+      filePath: filePath
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    if (req.file) {
+      fs.unlinkSync(req.file.path);
+    }
+    console.error('Error uploading manual form:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while uploading the manual form',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// Get manual form for student
+router.get('/students/:studentId/manual-form', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    
+    const [result] = await pool.query(
+      'SELECT manual_form_path, manual_form_uploaded_at FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    
+    if (result.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Student not found' 
+      });
+    }
+    
+    res.json({
+      success: true,
+      manualForm: result[0].manual_form_path ? {
+        filePath: result[0].manual_form_path,
+        uploadedAt: result[0].manual_form_uploaded_at
+      } : null
+    });
+    
+  } catch (error) {
+    console.error('Error fetching manual form:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch manual form',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Delete manual form for student
+router.delete('/students/:studentId/manual-form', async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { studentId } = req.params;
+    
+    // Get file path
+    const [student] = await connection.query(
+      'SELECT manual_form_path FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    
+    if (student.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Student not found' 
+      });
+    }
+    
+    if (!student[0].manual_form_path) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No manual form found' 
+      });
+    }
+    
+    // Delete file from filesystem
+    const filePath = path.join(__dirname, '..', student[0].manual_form_path);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    
+    // Update database
+    await connection.query(
+      'UPDATE users SET manual_form_path = NULL, manual_form_uploaded_at = NULL WHERE id = ?',
+      [studentId]
+    );
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Manual form deleted successfully'
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting manual form:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while deleting the manual form',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 // ============ DOCUMENT MANAGEMENT ============
 
 // Upload student document
