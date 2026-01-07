@@ -503,13 +503,15 @@ router.get('/leads/followups', async (req, res) => {
 router.get('/leads', async (req, res) => {
   try {
     const [leads] = await pool.query(
-      `SELECT l.*, 
-              COUNT(DISTINCT fu.id) as follow_up_count,
-              MAX(fu.followed_up_at) as last_follow_up
-       FROM leads l
-       LEFT JOIN follow_ups fu ON l.id = fu.lead_id
-       GROUP BY l.id
-       ORDER BY l.created_at DESC`
+        `SELECT l.*, 
+                COUNT(DISTINCT fu.id) as follow_up_count,
+                MAX(fu.followed_up_at) as last_follow_up,
+                COUNT(DISTINCT lca.counselor_id) as counselor_count
+        FROM leads l
+        LEFT JOIN follow_ups fu ON l.id = fu.lead_id
+        LEFT JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
+        GROUP BY l.id
+        ORDER BY l.created_at DESC`
     );
     
     res.json({
