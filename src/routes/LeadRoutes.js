@@ -469,6 +469,36 @@ router.get('/leads/:leadId/history', async (req, res) => {
   }
 });
 
+// Get all leads that have follow-ups (must come before /leads/:leadId to avoid route conflict)
+router.get('/leads/followups', async (req, res) => {
+  try {
+    const [followups] = await pool.query(
+      `SELECT l.*, 
+              COUNT(DISTINCT fu.id) as follow_up_count,
+              MAX(fu.followed_up_at) as last_follow_up
+       FROM leads l
+       INNER JOIN follow_ups fu ON l.id = fu.lead_id
+       GROUP BY l.id
+       HAVING follow_up_count > 0
+       ORDER BY last_follow_up DESC`
+    );
+    
+    res.json({
+      success: true,
+      followups: followups,
+      total: followups.length
+    });
+    
+  } catch (error) {
+    console.error('Error fetching follow-ups:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch follow-ups',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 // Get all leads with follow-up counts
 router.get('/leads', async (req, res) => {
   try {
