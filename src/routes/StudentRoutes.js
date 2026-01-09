@@ -297,6 +297,8 @@ router.post('/students', async (req, res) => {
           newStudentId,
           work.company_name,
           work.designation,
+          work.date_from || null,
+          work.date_to || null,
           work.duration || null,
           work.relation || null
         ]);
@@ -304,12 +306,13 @@ router.post('/students', async (req, res) => {
       if (workValues.length > 0) {
         await connection.query(
           `INSERT INTO student_work_experience 
-           (student_id, company_name, designation, duration, relation)
-           VALUES ?`,
+          (student_id, company_name, designation, date_from, date_to, duration, relation)
+          VALUES ?`,
           [workValues]
         );
       }
     }
+
     
     await connection.commit();
     
@@ -447,6 +450,8 @@ router.put('/students/:studentId', async (req, res) => {
           studentId,
           work.company_name,
           work.designation,
+          work.date_from || null,
+          work.date_to || null,
           work.duration || null,
           work.relation || null
         ]);
@@ -454,8 +459,8 @@ router.put('/students/:studentId', async (req, res) => {
       if (workValues.length > 0) {
         await connection.query(
           `INSERT INTO student_work_experience 
-           (student_id, company_name, designation, duration, relation)
-           VALUES ?`,
+          (student_id, company_name, designation, date_from, date_to, duration, relation)
+          VALUES ?`,
           [workValues]
         );
       }
