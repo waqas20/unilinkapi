@@ -714,6 +714,17 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       });
     }
     
+    // **ADD THIS: Generate student ID**
+    const currentYear = new Date().getFullYear();
+    const [result] = await connection.query(
+      `SELECT MAX(CAST(SUBSTRING(student_id, 8) AS UNSIGNED)) as max_id 
+       FROM users 
+       WHERE student_id LIKE 'STU${currentYear}%' AND role = 'client'`
+    );
+    
+    const nextId = (result[0].max_id || 0) + 1;
+    const studentId = `STU${currentYear}${String(nextId).padStart(3, '0')}`;
+    
     // Generate random password
     const generatedPassword = generatePassword(12);
     
@@ -721,10 +732,10 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(generatedPassword, saltRounds);
     
-    // Create user account
+    // **MODIFY THIS: Create user account with student_id**
     const [userResult] = await connection.query(
-      'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)',
-      [lead.full_name, lead.email, hashedPassword, 'client']
+      'INSERT INTO users (student_id, name, email, password, role) VALUES (?, ?, ?, ?, ?)',
+      [studentId, lead.full_name, lead.email, hashedPassword, 'client']
     );
     
     const userId = userResult.insertId;
