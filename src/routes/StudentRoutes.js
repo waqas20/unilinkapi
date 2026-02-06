@@ -1078,4 +1078,111 @@ router.post('/students/:studentId/meetings', async (req, res) => {
   }
 });
 
+// Create multiple applications for student
+router.post('/students/:studentId/create-applications', async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { studentId } = req.params;
+    const { countryIds } = req.body;
+    
+    if (!countryIds || !Array.isArray(countryIds) || countryIds.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Please provide at least one country ID' 
+      });
+    }
+    
+    // Get student info
+    const [student] = await connection.query(
+      'SELECT id, name, student_id FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    
+    if (student.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Student not found' 
+      });
+    }
+    
+    // Check for existing applications
+    const [existingApps] = await connection.query(
+      'SELECT country_id FROM applications WHERE student_id = ? AND country_id IN (?)',
+      [studentId, countryIds]
+    );
+    
+    if (existingApps.length > 0) {
+      const existingCountryIds = existingApps.map(app => app.country_id);
+      await connection.rollback();
+      return res.status(409).json({ 
+        success: false, 
+        message: 'Applications already exist for some selected countries',
+        existingCountryIds: existingCountryIds
+      });
+    }
+    
+    let createdCount = 0;
+    const currentDate = new Date().toISOString().split('T')[0];
+    
+    // Create application for each country
+    for (const countryId of countryIds) {
+      // Verify country exists
+      const [country] = await connection.query(
+        'SELECT id, country_name FROM countries WHERE id = ? AND status = ?',
+        [countryId, 'Active']
+      );
+      
+      if (country.length === 0) {
+        continue; // Skip invalid countries
+      }
+      
+      // Generate application ID
+      const currentYear = new Date().getFullYear();
+      const [result] = await connection.query(
+        `SELECT MAX(CAST(SUBSTRING(application_id, 8) AS UNSIGNED)) as max_id 
+         FROM applications 
+         WHERE application_id LIKE 'APP\${currentYear}%'`
+      );
+      
+      const nextId = (result[0].max_id || 0) + 1;
+      const applicationId = `APP\${currentYear}\${String(nextId).padStart(3, '0')}`;
+      
+      // Insert application with minimal data (country only, other fields can be filled later)
+      await connection.query(
+        `INSERT INTO applications 
+         (application_id, application_date, student_id, student_name, country_id, 
+          application_status, tagging_status)
+         VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
+        [applicationId, currentDate, studentId, student[0].name, countryId]
+      );
+      
+      createdCount++;
+    }
+    
+    await connection.commit();
+    
+    res.status(201).json({
+      success: true,
+      message: `Successfully created \${createdCount} application(s)`,
+      createdCount: createdCount
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating applications:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while creating applications',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 export default router;
