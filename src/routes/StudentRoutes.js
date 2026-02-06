@@ -1128,6 +1128,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
     
     let createdCount = 0;
     const currentDate = new Date().toISOString().split('T')[0];
+    const currentYear = new Date().getFullYear();
     
     // Create application for each country
     for (const countryId of countryIds) {
@@ -1142,15 +1143,15 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
       }
       
       // Generate application ID
-      const currentYear = new Date().getFullYear();
       const [result] = await connection.query(
         `SELECT MAX(CAST(SUBSTRING(application_id, 8) AS UNSIGNED)) as max_id 
          FROM applications 
-         WHERE application_id LIKE 'APP\${currentYear}%'`
+         WHERE application_id LIKE ?`,
+        [`APP${currentYear}%`]
       );
       
       const nextId = (result[0].max_id || 0) + 1;
-      const applicationId = `APP\${currentYear}\${String(nextId).padStart(3, '0')}`;
+      const applicationId = `APP${currentYear}${String(nextId).padStart(3, '0')}`;
       
       // Insert application with minimal data (country only, other fields can be filled later)
       await connection.query(
@@ -1168,7 +1169,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
     
     res.status(201).json({
       success: true,
-      message: `Successfully created \${createdCount} application(s)`,
+      message: `Successfully created ${createdCount} application(s)`,
       createdCount: createdCount
     });
     
