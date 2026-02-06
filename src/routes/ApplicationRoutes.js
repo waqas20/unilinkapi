@@ -1,7 +1,45 @@
 import express from 'express';
 import pool from '../config/db.js';
+import multer from 'multer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+
+// Configure multer for manual form uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, '../uploads/application-forms');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'form-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = /jpeg|jpg|png|pdf|doc|docx/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only images, PDFs, and documents are allowed'));
+    }
+  }
+});
 
 // Generate application ID
 const generateApplicationId = async (connection) => {
@@ -397,9 +435,9 @@ router.delete('/applications/:applicationId', async (req, res) => {
     
     const { applicationId } = req.params;
     
-    // Check if application exists
+    // Check if application exists and get manual form path
     const [existingApplication] = await connection.query(
-      'SELECT id, application_id FROM applications WHERE id = ?',
+      'SELECT id, application_id, manual_form_path FROM applications WHERE id = ?',
       [applicationId]
     );
     
@@ -409,6 +447,14 @@ router.delete('/applications/:applicationId', async (req, res) => {
         success: false, 
         message: 'Application not found' 
       });
+    }
+    
+    // Delete manual form file if exists
+    if (existingApplication[0].manual_form_path) {
+      const filePath = path.join(__dirname, '..', existingApplication[0].manual_form_path);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     }
     
     // Delete application
@@ -427,6 +473,178 @@ router.delete('/applications/:applicationId', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'An error occurred while deleting the application',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// Upload manual form for application
+router.post('/applications/:applicationId/manual-form', upload.single('manualForm'), async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { applicationId } = req.params;
+    
+    if (!req.file) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No file uploaded' 
+      });
+    }
+    
+    // Check if application exists
+    const [application] = await connection.query(
+      'SELECT id, manual_form_path FROM applications WHERE id = ?',
+      [applicationId]
+    );
+    
+    if (application.length === 0) {
+      await connection.rollback();
+      if (req.file) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Application not found' 
+      });
+    }
+    
+    // Delete old file if exists
+    if (application[0].manual_form_path) {
+      const oldFilePath = path.join(__dirname, '..', application[0].manual_form_path);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    
+    const filePath = `/uploads/application-forms/${req.file.filename}`;
+    
+    // Update application record with manual form path
+    await connection.query(
+      'UPDATE applications SET manual_form_path = ?, manual_form_uploaded_at = NOW() WHERE id = ?',
+      [filePath, applicationId]
+    );
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Manual form uploaded successfully',
+      filePath: filePath
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    if (req.file) {
+      fs.unlinkSync(req.file.path);
+    }
+    console.error('Error uploading manual form:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while uploading the manual form',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
+// Get manual form for application
+router.get('/applications/:applicationId/manual-form', async (req, res) => {
+  try {
+    const { applicationId } = req.params;
+    
+    const [result] = await pool.query(
+      'SELECT manual_form_path, manual_form_uploaded_at FROM applications WHERE id = ?',
+      [applicationId]
+    );
+    
+    if (result.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Application not found' 
+      });
+    }
+    
+    res.json({
+      success: true,
+      manualForm: result[0].manual_form_path ? {
+        filePath: result[0].manual_form_path,
+        uploadedAt: result[0].manual_form_uploaded_at
+      } : null
+    });
+    
+  } catch (error) {
+    console.error('Error fetching manual form:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch manual form',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Delete manual form for application
+router.delete('/applications/:applicationId/manual-form', async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { applicationId } = req.params;
+    
+    // Get file path
+    const [application] = await connection.query(
+      'SELECT manual_form_path FROM applications WHERE id = ?',
+      [applicationId]
+    );
+    
+    if (application.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Application not found' 
+      });
+    }
+    
+    if (!application[0].manual_form_path) {
+      await connection.rollback();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No manual form found' 
+      });
+    }
+    
+    // Delete file from filesystem
+    const filePath = path.join(__dirname, '..', application[0].manual_form_path);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    
+    // Update database
+    await connection.query(
+      'UPDATE applications SET manual_form_path = NULL, manual_form_uploaded_at = NULL WHERE id = ?',
+      [applicationId]
+    );
+    
+    await connection.commit();
+    
+    res.json({
+      success: true,
+      message: 'Manual form deleted successfully'
+    });
+    
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting manual form:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'An error occurred while deleting the manual form',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
