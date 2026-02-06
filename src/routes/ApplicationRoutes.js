@@ -67,8 +67,8 @@ router.get('/applications', async (req, res) => {
        FROM applications a
        INNER JOIN users u ON a.student_id = u.id
        INNER JOIN countries c ON a.country_id = c.id
-       INNER JOIN universities un ON a.university_id = un.id
-       INNER JOIN intakes i ON a.intake_id = i.id
+       LEFT JOIN universities un ON a.university_id = un.id
+       LEFT JOIN intakes i ON a.intake_id = i.id
        ORDER BY a.created_at DESC`
     );
     
@@ -105,8 +105,8 @@ router.get('/applications/:applicationId', async (req, res) => {
        FROM applications a
        INNER JOIN users u ON a.student_id = u.id
        INNER JOIN countries c ON a.country_id = c.id
-       INNER JOIN universities un ON a.university_id = un.id
-       INNER JOIN intakes i ON a.intake_id = i.id
+       LEFT JOIN universities un ON a.university_id = un.id
+       LEFT JOIN intakes i ON a.intake_id = i.id
        WHERE a.id = ?`,
       [applicationId]
     );
@@ -145,8 +145,8 @@ router.get('/applications/student/:studentId', async (req, res) => {
               i.intake_name
        FROM applications a
        INNER JOIN countries c ON a.country_id = c.id
-       INNER JOIN universities un ON a.university_id = un.id
-       INNER JOIN intakes i ON a.intake_id = i.id
+       LEFT JOIN universities un ON a.university_id = un.id
+       LEFT JOIN intakes i ON a.intake_id = i.id
        WHERE a.student_id = ?
        ORDER BY a.created_at DESC`,
       [studentId]

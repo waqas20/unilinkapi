@@ -1169,7 +1169,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
     
     res.status(201).json({
       success: true,
-      message: `Successfully created ${createdCount} application(s)`,
+      message: `Successfully created application(s)`,
       createdCount: createdCount
     });
     
