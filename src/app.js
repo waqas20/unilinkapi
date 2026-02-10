@@ -11,6 +11,7 @@ import countryRoutes from './routes/countryRoutes.js';
 import universityRoutes from './routes/universityRoutes.js';
 import intakeRoutes from './routes/intakeRoutes.js';
 import ApplicationRoutes from './routes/ApplicationRoutes.js';
+import VisaRoutes from './routes/VisaRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
