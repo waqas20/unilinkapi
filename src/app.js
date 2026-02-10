@@ -40,6 +40,7 @@ app.use('/', countryRoutes);
 app.use('/', universityRoutes);
 app.use('/', intakeRoutes);
 app.use('/', ApplicationRoutes);
+app.use('/', VisaRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
