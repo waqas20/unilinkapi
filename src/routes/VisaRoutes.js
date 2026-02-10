@@ -10,6 +10,18 @@ const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
+// Serve uploaded files
+router.get('/uploads/visa-documents/:filename', (req, res) => {
+  const { filename } = req.params;
+  const filePath = path.join(__dirname, '../uploads/visa-documents', filename);
+  
+  if (fs.existsSync(filePath)) {
+    res.sendFile(filePath);
+  } else {
+    res.status(404).json({ success: false, message: 'File not found' });
+  }
+});
+
 // Configure multer for visa document uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
