@@ -254,14 +254,14 @@ router.post('/students', async (req, res) => {
     // Insert student
     const [result] = await connection.query(
       `INSERT INTO users 
-        (student_id, name, middle_name, surname, email, mobile, address, country, dob, 
-          guardian_name, guardian_relation, guardian_mobile, guardian_email, source_inquiry, 
-          course, password, role, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
-        [studentId, fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, 
-        mobile.trim(), address.trim(), country, dob, guardianName.trim(), guardianRelation.trim(), 
-        guardianMobile.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
-        course?.trim() || null, hashedPassword]
+      (student_id, name, middle_name, surname, email, mobile, address, country, dob, 
+        guardian_name, guardian_relation, guardian_mobile, guardian_email, source_inquiry, 
+        course, password, role, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
+      [studentId, firstName.trim(), middleName?.trim() || null, surname.trim(), trimmedEmail, 
+      mobile.trim(), address.trim(), country, dob, guardianName.trim(), guardianRelation.trim(), 
+      guardianMobile.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
+      course?.trim() || null, hashedPassword]
     );
     
     const newStudentId = result.insertId;
@@ -365,7 +365,6 @@ router.put('/students/:studentId', async (req, res) => {
     }
 
     const trimmedEmail = email.trim().toLowerCase();
-    const fullName = `${firstName.trim()} ${middleName ? middleName.trim() + ' ' : ''}${surname.trim()}`;
 
     // Format date to YYYY-MM-DD
     const formattedDob = dob.split('T')[0];
@@ -401,14 +400,14 @@ router.put('/students/:studentId', async (req, res) => {
     // Update student basic info
     await connection.query(
       `UPDATE users 
-        SET name = ?, middle_name = ?, surname = ?, email = ?, mobile = ?, address = ?, 
-            country = ?, dob = ?, guardian_name = ?, guardian_relation = ?, 
-            guardian_mobile = ?, guardian_email = ?, source_inquiry = ?, status = ?, course = ?
-        WHERE id = ?`,
-        [fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, mobile.trim(), 
-        address.trim(), country, formattedDob, guardianName?.trim(), guardianRelation?.trim(), 
-        guardianMobile?.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
-        status || 'Active', course?.trim() || null, studentId]
+      SET name = ?, middle_name = ?, surname = ?, email = ?, mobile = ?, address = ?, 
+          country = ?, dob = ?, guardian_name = ?, guardian_relation = ?, 
+          guardian_mobile = ?, guardian_email = ?, source_inquiry = ?, status = ?, course = ?
+      WHERE id = ?`,
+      [firstName.trim(), middleName?.trim() || null, surname.trim(), trimmedEmail, mobile.trim(), 
+      address.trim(), country, formattedDob, guardianName?.trim(), guardianRelation?.trim(), 
+      guardianMobile?.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
+      status || 'Active', course?.trim() || null, studentId]
     );
     
     // Update education details
