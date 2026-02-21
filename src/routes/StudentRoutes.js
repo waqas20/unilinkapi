@@ -448,13 +448,13 @@ router.put('/students/:studentId', async (req, res) => {
       const workValues = workExperience
         .filter(work => work.company_name && work.designation)
         .map(work => [
-          studentId,
-          work.company_name,
-          work.designation,
-          work.date_from || null,
-          work.date_to || null,
-          work.duration || null,
-          work.relation || null
+            studentId,
+            work.company_name,
+            work.designation,
+            work.date_from ? work.date_from.split('T')[0] : null,
+            work.date_to ? work.date_to.split('T')[0] : null,
+            work.duration || null,
+            work.relation || null
         ]);
       
       if (workValues.length > 0) {
