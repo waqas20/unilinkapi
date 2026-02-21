@@ -83,15 +83,15 @@ router.get('/students', async (req, res) => {
   try {
     const [students] = await pool.query(
       `SELECT u.id, u.student_id, u.name, u.middle_name, u.surname, u.email, 
-              u.mobile, u.country, u.dob, u.status, u.created_at,
-              COUNT(DISTINCT sc.counselor_id) as counselor_count,
-              COUNT(DISTINCT cm.id) as meeting_count
-       FROM users u
-       LEFT JOIN student_counselors sc ON u.id = sc.user_id
-       LEFT JOIN counselor_meetings cm ON u.id = cm.user_id
-       WHERE u.role = 'client'
-       GROUP BY u.id
-       ORDER BY u.created_at DESC`
+        u.mobile, u.country, u.dob, u.status, u.course, u.created_at,
+        COUNT(DISTINCT sc.counselor_id) as counselor_count,
+        COUNT(DISTINCT cm.id) as meeting_count
+      FROM users u
+      LEFT JOIN student_counselors sc ON u.id = sc.user_id
+      LEFT JOIN counselor_meetings cm ON u.id = cm.user_id
+      WHERE u.role = 'client'
+      GROUP BY u.id
+      ORDER BY u.created_at DESC`
     );
     
     res.json({
@@ -194,9 +194,9 @@ router.post('/students', async (req, res) => {
     await connection.beginTransaction();
     
     const {
-      firstName, middleName, surname, email, mobile, address, country, dob,
-      guardianName, guardianRelation, guardianMobile, guardianEmail, sourceInquiry,
-      education, workExperience
+        firstName, middleName, surname, email, mobile, address, country, dob,
+        guardianName, guardianRelation, guardianMobile, guardianEmail, sourceInquiry,
+        course, education, workExperience
     } = req.body;
     
     // Validate required fields
@@ -254,13 +254,14 @@ router.post('/students', async (req, res) => {
     // Insert student
     const [result] = await connection.query(
       `INSERT INTO users 
-       (student_id, name, middle_name, surname, email, mobile, address, country, dob, 
-        guardian_name, guardian_relation, guardian_mobile, guardian_email, source_inquiry, 
-        password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
-      [studentId, fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, 
-       mobile.trim(), address.trim(), country, dob, guardianName.trim(), guardianRelation.trim(), 
-       guardianMobile.trim(), guardianEmail?.trim() || null, sourceInquiry || null, hashedPassword]
+        (student_id, name, middle_name, surname, email, mobile, address, country, dob, 
+          guardian_name, guardian_relation, guardian_mobile, guardian_email, source_inquiry, 
+          course, password, role, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
+        [studentId, fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, 
+        mobile.trim(), address.trim(), country, dob, guardianName.trim(), guardianRelation.trim(), 
+        guardianMobile.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
+        course?.trim() || null, hashedPassword]
     );
     
     const newStudentId = result.insertId;
@@ -349,9 +350,9 @@ router.put('/students/:studentId', async (req, res) => {
     
     const { studentId } = req.params;
     const {
-      firstName, middleName, surname, email, mobile, address, country, dob,
-      guardianName, guardianRelation, guardianMobile, guardianEmail, sourceInquiry,
-      status, education, workExperience
+        firstName, middleName, surname, email, mobile, address, country, dob,
+        guardianName, guardianRelation, guardianMobile, guardianEmail, sourceInquiry,
+        status, course, education, workExperience
     } = req.body;
     
     // Validate required fields
@@ -400,14 +401,14 @@ router.put('/students/:studentId', async (req, res) => {
     // Update student basic info
     await connection.query(
       `UPDATE users 
-       SET name = ?, middle_name = ?, surname = ?, email = ?, mobile = ?, address = ?, 
-           country = ?, dob = ?, guardian_name = ?, guardian_relation = ?, 
-           guardian_mobile = ?, guardian_email = ?, source_inquiry = ?, status = ?
-       WHERE id = ?`,
-      [fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, mobile.trim(), 
-       address.trim(), country, formattedDob, guardianName?.trim(), guardianRelation?.trim(), 
-       guardianMobile?.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
-       status || 'Active', studentId]
+        SET name = ?, middle_name = ?, surname = ?, email = ?, mobile = ?, address = ?, 
+            country = ?, dob = ?, guardian_name = ?, guardian_relation = ?, 
+            guardian_mobile = ?, guardian_email = ?, source_inquiry = ?, status = ?, course = ?
+        WHERE id = ?`,
+        [fullName, middleName?.trim() || null, surname.trim(), trimmedEmail, mobile.trim(), 
+        address.trim(), country, formattedDob, guardianName?.trim(), guardianRelation?.trim(), 
+        guardianMobile?.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
+        status || 'Active', course?.trim() || null, studentId]
     );
     
     // Update education details
