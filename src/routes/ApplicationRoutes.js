@@ -684,4 +684,71 @@ router.get('/applications/stats/overview', async (req, res) => {
   }
 });
 
+
+// Dashboard statistics
+router.get('/dashboard/stats', async (req, res) => {
+  try {
+    const [leadStats] = await pool.query(
+      `SELECT COUNT(*) as total_leads FROM leads`
+    );
+
+    const [studentStats] = await pool.query(
+      `SELECT COUNT(*) as total_students FROM users WHERE role = 'client'`
+    );
+
+    const [applicationStats] = await pool.query(
+      `SELECT COUNT(*) as active_applications 
+       FROM applications 
+       WHERE application_status NOT IN ('Closed', 'Rejected')`
+    );
+
+    const [visaStats] = await pool.query(
+      `SELECT 
+        SUM(CASE WHEN visa_status = 'Pending' THEN 1 ELSE 0 END) as pending_visas,
+        SUM(CASE WHEN visa_status = 'Approved' THEN 1 ELSE 0 END) as approved_visas
+       FROM visas`
+    );
+
+    res.json({
+      success: true,
+      stats: {
+        totalLeads: leadStats[0].total_leads,
+        totalStudents: studentStats[0].total_students,
+        activeApplications: applicationStats[0].active_applications,
+        pendingVisas: visaStats[0].pending_visas || 0,
+        approvedVisas: visaStats[0].approved_visas || 0
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching dashboard stats:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch dashboard statistics' });
+  }
+});
+
+// Recent applications for dashboard
+router.get('/dashboard/recent-applications', async (req, res) => {
+  try {
+    const [applications] = await pool.query(
+      `SELECT a.id, a.application_id, a.program, a.application_status, a.created_at,
+              u.name as student_name,
+              c.country_name
+       FROM applications a
+       INNER JOIN users u ON a.student_id = u.id
+       INNER JOIN countries c ON a.country_id = c.id
+       ORDER BY a.created_at DESC
+       LIMIT 10`
+    );
+
+    res.json({
+      success: true,
+      applications
+    });
+
+  } catch (error) {
+    console.error('Error fetching recent applications:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch recent applications' });
+  }
+});
+
 export default router;
