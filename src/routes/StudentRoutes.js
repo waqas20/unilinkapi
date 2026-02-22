@@ -28,12 +28,11 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: function (req, file, cb) {
     const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
-    
     if (mimetype && extname) {
       return cb(null, true);
     } else {
@@ -42,7 +41,6 @@ const upload = multer({
   }
 });
 
-// Validation helper functions
 const validateEmail = (email) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -53,7 +51,6 @@ const validatePhone = (phone) => {
   return phoneRegex.test(phone) && phone.replace(/\D/g, '').length >= 10;
 };
 
-// Generate student ID
 const generateStudentId = async (connection) => {
   const currentYear = new Date().getFullYear();
   const [result] = await connection.query(
@@ -61,12 +58,10 @@ const generateStudentId = async (connection) => {
      FROM users 
      WHERE student_id LIKE 'STU${currentYear}%' AND role = 'client'`
   );
-  
   const nextId = (result[0].max_id || 0) + 1;
   return `STU${currentYear}${String(nextId).padStart(3, '0')}`;
 };
 
-// Generate random password
 const generatePassword = (length = 12) => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*';
   let password = '';
@@ -93,20 +88,10 @@ router.get('/students', async (req, res) => {
       GROUP BY u.id
       ORDER BY u.created_at DESC`
     );
-    
-    res.json({
-      success: true,
-      students: students,
-      total: students.length
-    });
-    
+    res.json({ success: true, students, total: students.length });
   } catch (error) {
     console.error('Error fetching students:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch students',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'Failed to fetch students' });
   }
 });
 
@@ -114,39 +99,30 @@ router.get('/students', async (req, res) => {
 router.get('/students/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
-    
-    // Get student basic info
+
     const [students] = await pool.query(
       `SELECT * FROM users WHERE id = ? AND role = 'client'`,
       [studentId]
     );
-    
     if (students.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
-    // Get education details
+
     const [education] = await pool.query(
       'SELECT * FROM student_education WHERE student_id = ? ORDER BY start_date DESC',
       [studentId]
     );
-    
-    // Get work experience
+
     const [workExperience] = await pool.query(
       'SELECT * FROM student_work_experience WHERE student_id = ? ORDER BY id DESC',
       [studentId]
     );
-    
-    // Get documents
+
     const [documents] = await pool.query(
-      'SELECT * FROM student_documents WHERE student_id = ? ORDER BY uploaded_at DESC',
+      'SELECT * FROM student_documents WHERE student_id = ? ORDER BY display_order ASC, uploaded_at DESC',
       [studentId]
     );
-    
-    // Get assigned counselors
+
     const [counselors] = await pool.query(
       `SELECT c.*, sc.assigned_at
        FROM counselors c
@@ -155,8 +131,7 @@ router.get('/students/:studentId', async (req, res) => {
        ORDER BY sc.assigned_at DESC`,
       [studentId]
     );
-    
-    // Get meetings
+
     const [meetings] = await pool.query(
       `SELECT cm.*, c.name as counselor_name, c.counselor_id, c.email as counselor_email
        FROM counselor_meetings cm
@@ -165,177 +140,230 @@ router.get('/students/:studentId', async (req, res) => {
        ORDER BY cm.meeting_date DESC, cm.meeting_time DESC`,
       [studentId]
     );
-    
+
+    // Get emergency contact
+    const [emergencyContacts] = await pool.query(
+      'SELECT * FROM student_emergency_contact WHERE student_id = ? LIMIT 1',
+      [studentId]
+    );
+
+    // Get family details
+    const [familyDetails] = await pool.query(
+      'SELECT * FROM student_family_details WHERE student_id = ? ORDER BY FIELD(type, "Father","Mother","Sponsor")',
+      [studentId]
+    );
+
+    // Get activities
+    const [activities] = await pool.query(
+      'SELECT * FROM student_activities WHERE student_id = ? ORDER BY id ASC',
+      [studentId]
+    );
+
+    // Get awards
+    const [awards] = await pool.query(
+      'SELECT * FROM student_awards WHERE student_id = ? ORDER BY id ASC',
+      [studentId]
+    );
+
     res.json({
       success: true,
       student: students[0],
-      education: education,
-      workExperience: workExperience,
-      documents: documents,
+      education,
+      workExperience,
+      documents,
       assignedCounselors: counselors,
-      meetings: meetings
+      meetings,
+      emergencyContact: emergencyContacts[0] || null,
+      familyDetails,
+      activities,
+      awards
     });
-    
+
   } catch (error) {
     console.error('Error fetching student:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch student',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'Failed to fetch student' });
   }
 });
 
 // Create new student
 router.post('/students', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
+
     const {
-        firstName, middleName, surname, email, mobile, address, country, dob,
-        guardianName, guardianRelation, guardianMobile, guardianEmail, sourceInquiry,
-        course, education, workExperience
+      firstName, middleName, surname, email, alternativeEmail,
+      mobile, landline, address, postalCode, country, dob,
+      nationality, maritalStatus, gender,
+      cityOfBirth, countryOfBirth,
+      passportNo, passportIssueDate, passportPlaceOfIssue,
+      guardianName, guardianRelation, guardianMobile, guardianEmail,
+      sourceInquiry, course,
+      emergencyContact, familyDetails,
+      education, workExperience, activities, awards
     } = req.body;
-    
-    // Validate required fields
-    if (!firstName || !surname || !email || !mobile || !address || !country || !dob || 
-        !guardianName || !guardianRelation || !guardianMobile) {
+
+    if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'All required fields must be provided' 
-      });
+      return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
-    const fullName = `${firstName.trim()} ${middleName ? middleName.trim() + ' ' : ''}${surname.trim()}`;
 
-    // Validate email format
     if (!validateEmail(trimmedEmail)) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please provide a valid email address' 
-      });
+      return res.status(400).json({ success: false, message: 'Please provide a valid email address' });
     }
 
-    // Validate phone format
     if (!validatePhone(mobile)) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please provide a valid phone number (minimum 10 digits)' 
-      });
+      return res.status(400).json({ success: false, message: 'Please provide a valid phone number' });
     }
 
-    // Check if email already exists
     const [existingUser] = await connection.query(
-      'SELECT id, email FROM users WHERE email = ?',
-      [trimmedEmail]
+      'SELECT id FROM users WHERE email = ?', [trimmedEmail]
     );
-    
     if (existingUser.length > 0) {
       await connection.rollback();
-      return res.status(409).json({ 
-        success: false, 
-        message: 'A user with this email already exists' 
-      });
+      return res.status(409).json({ success: false, message: 'A user with this email already exists' });
     }
 
-    // Generate student ID
     const studentId = await generateStudentId(connection);
-    
-    // Generate password
     const generatedPassword = generatePassword(12);
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
-    
-    // Insert student
+
     const [result] = await connection.query(
       `INSERT INTO users 
-      (student_id, name, middle_name, surname, email, mobile, address, country, dob, 
-        guardian_name, guardian_relation, guardian_mobile, guardian_email, source_inquiry, 
-        course, password, role, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
-      [studentId, firstName.trim(), middleName?.trim() || null, surname.trim(), trimmedEmail, 
-      mobile.trim(), address.trim(), country, dob, guardianName.trim(), guardianRelation.trim(), 
-      guardianMobile.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
-      course?.trim() || null, hashedPassword]
+      (student_id, name, middle_name, surname, email, alternative_email, mobile, landline,
+       address, postal_code, country, dob, nationality, marital_status, gender,
+       city_of_birth, country_of_birth, passport_no, passport_issue_date, passport_place_of_issue,
+       guardian_name, guardian_relation, guardian_mobile, guardian_email,
+       source_inquiry, course, password, role, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
+      [
+        studentId, firstName.trim(), middleName?.trim() || null, surname.trim(),
+        trimmedEmail, alternativeEmail?.trim() || null,
+        mobile.trim(), landline?.trim() || null,
+        address.trim(), postalCode?.trim() || null,
+        country, dob,
+        nationality?.trim() || null, maritalStatus || null, gender || null,
+        cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
+        passportNo?.trim() || null,
+        passportIssueDate || null,
+        passportPlaceOfIssue?.trim() || null,
+        guardianName?.trim() || null, guardianRelation?.trim() || null,
+        guardianMobile?.trim() || null, guardianEmail?.trim() || null,
+        sourceInquiry || null, course?.trim() || null,
+        hashedPassword
+      ]
     );
-    
+
     const newStudentId = result.insertId;
-    
-    // Insert education details if provided
+
+    // Insert emergency contact
+    if (emergencyContact && (emergencyContact.full_name || emergencyContact.contact_no)) {
+      await connection.query(
+        `INSERT INTO student_emergency_contact (student_id, full_name, relation, contact_no, email, address, postal_code)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [newStudentId, emergencyContact.full_name || null, emergencyContact.relation || null,
+         emergencyContact.contact_no || null, emergencyContact.email || null,
+         emergencyContact.address || null, emergencyContact.postal_code || null]
+      );
+    }
+
+    // Insert family details
+    if (familyDetails && Array.isArray(familyDetails)) {
+      for (const member of familyDetails) {
+        if (member.type && (member.full_name || member.contact_no)) {
+          await connection.query(
+            `INSERT INTO student_family_details (student_id, type, full_name, relation, contact_no, email, profession, address, sponsor_note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [newStudentId, member.type, member.full_name || null, member.relation || null,
+             member.contact_no || null, member.email || null, member.profession || null,
+             member.address || null, member.sponsor_note || null]
+          );
+        }
+      }
+    }
+
+    // Insert education
     if (education && Array.isArray(education) && education.length > 0) {
       const educationValues = education
-        .filter(edu => edu.education_level && edu.institute_name && edu.start_date)
+        .filter(edu => edu.education_level && edu.institute_name)
         .map(edu => [
-          newStudentId,
-          edu.education_level,
-          edu.institute_name,
-          edu.start_date,
-          edu.end_date || null,
-          edu.result || null,
-          edu.remarks || null
+          newStudentId, edu.education_level, edu.institute_name,
+          edu.start_date || null, edu.end_date || null,
+          edu.result || null, edu.subjects || null, edu.cgpa || null, edu.remarks || null
         ]);
-      
       if (educationValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_education 
-           (student_id, education_level, institute_name, start_date, end_date, result, remarks)
+          `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, result, subjects, cgpa, remarks)
            VALUES ?`,
           [educationValues]
         );
       }
     }
-    
-    // Insert work experience if provided
+
+    // Insert activities
+    if (activities && Array.isArray(activities) && activities.length > 0) {
+      const activityValues = activities
+        .filter(a => a.activity_name)
+        .map(a => [newStudentId, a.activity_name, a.description || null,
+          a.grade_levels || null, a.hours_per_week || null, a.weeks_per_year || null]);
+      if (activityValues.length > 0) {
+        await connection.query(
+          `INSERT INTO student_activities (student_id, activity_name, description, grade_levels, hours_per_week, weeks_per_year)
+           VALUES ?`,
+          [activityValues]
+        );
+      }
+    }
+
+    // Insert awards
+    if (awards && Array.isArray(awards) && awards.length > 0) {
+      const awardValues = awards
+        .filter(a => a.award_name)
+        .map(a => [newStudentId, a.award_name, a.recognition_level || null,
+          a.award_type || null, a.received_date || null, a.description || null]);
+      if (awardValues.length > 0) {
+        await connection.query(
+          `INSERT INTO student_awards (student_id, award_name, recognition_level, award_type, received_date, description)
+           VALUES ?`,
+          [awardValues]
+        );
+      }
+    }
+
+    // Insert work experience
     if (workExperience && Array.isArray(workExperience) && workExperience.length > 0) {
       const workValues = workExperience
-        .filter(work => work.company_name && work.designation)
-        .map(work => [
-          newStudentId,
-          work.company_name,
-          work.designation,
-          work.date_from || null,
-          work.date_to || null,
-          work.duration || null,
-          work.relation || null
-        ]);
-      
+        .filter(w => w.company_name && w.designation)
+        .map(w => [newStudentId, w.company_name, w.designation,
+          w.date_from || null, w.date_to || null, w.duration || null,
+          w.employment_type || null, w.relation || null]);
       if (workValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_work_experience 
-          (student_id, company_name, designation, date_from, date_to, duration, relation)
-          VALUES ?`,
+          `INSERT INTO student_work_experience (student_id, company_name, designation, date_from, date_to, duration, employment_type, relation)
+           VALUES ?`,
           [workValues]
         );
       }
     }
 
-    
     await connection.commit();
-    
+
     res.status(201).json({
       success: true,
       message: 'Student created successfully',
       studentId: newStudentId,
       generatedStudentId: studentId,
-      credentials: {
-        email: trimmedEmail,
-        password: generatedPassword
-      }
+      credentials: { email: trimmedEmail, password: generatedPassword }
     });
-    
+
   } catch (error) {
     await connection.rollback();
     console.error('Error creating student:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while creating the student',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while creating the student' });
   } finally {
     connection.release();
   }
@@ -344,143 +372,193 @@ router.post('/students', async (req, res) => {
 // Update student
 router.put('/students/:studentId', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
+
     const { studentId } = req.params;
     const {
-        firstName, middleName, surname, email, mobile, address, country, dob,
-        guardianName, guardianRelation, guardianMobile, guardianEmail, sourceInquiry,
-        status, course, education, workExperience
+      firstName, middleName, surname, email, alternativeEmail,
+      mobile, landline, address, postalCode, country, dob,
+      nationality, maritalStatus, gender,
+      cityOfBirth, countryOfBirth,
+      passportNo, passportIssueDate, passportPlaceOfIssue,
+      guardianName, guardianRelation, guardianMobile, guardianEmail,
+      sourceInquiry, status, course,
+      emergencyContact, familyDetails,
+      education, workExperience, activities, awards
     } = req.body;
-    
-    // Validate required fields
+
     if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'All required fields must be provided' 
-      });
+      return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
-
-    // Format date to YYYY-MM-DD
     const formattedDob = dob.split('T')[0];
 
-    // Check if student exists
     const [existingStudent] = await connection.query(
-      'SELECT id FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
+      'SELECT id FROM users WHERE id = ? AND role = ?', [studentId, 'client']
     );
-    
     if (existingStudent.length === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
-    // Check if email is being changed to one that already exists
     const [emailCheck] = await connection.query(
-      'SELECT id FROM users WHERE email = ? AND id != ?',
-      [trimmedEmail, studentId]
+      'SELECT id FROM users WHERE email = ? AND id != ?', [trimmedEmail, studentId]
     );
-    
     if (emailCheck.length > 0) {
       await connection.rollback();
-      return res.status(409).json({ 
-        success: false, 
-        message: 'This email address is already associated with another user' 
-      });
+      return res.status(409).json({ success: false, message: 'Email already associated with another user' });
     }
-    
-    // Update student basic info
+
+    // Update users table
     await connection.query(
-      `UPDATE users 
-      SET name = ?, middle_name = ?, surname = ?, email = ?, mobile = ?, address = ?, 
-          country = ?, dob = ?, guardian_name = ?, guardian_relation = ?, 
-          guardian_mobile = ?, guardian_email = ?, source_inquiry = ?, status = ?, course = ?
+      `UPDATE users SET
+        name = ?, middle_name = ?, surname = ?, email = ?, alternative_email = ?,
+        mobile = ?, landline = ?, address = ?, postal_code = ?, country = ?, dob = ?,
+        nationality = ?, marital_status = ?, gender = ?,
+        city_of_birth = ?, country_of_birth = ?,
+        passport_no = ?, passport_issue_date = ?, passport_place_of_issue = ?,
+        guardian_name = ?, guardian_relation = ?, guardian_mobile = ?, guardian_email = ?,
+        source_inquiry = ?, status = ?, course = ?
       WHERE id = ?`,
-      [firstName.trim(), middleName?.trim() || null, surname.trim(), trimmedEmail, mobile.trim(), 
-      address.trim(), country, formattedDob, guardianName?.trim(), guardianRelation?.trim(), 
-      guardianMobile?.trim(), guardianEmail?.trim() || null, sourceInquiry || null, 
-      status || 'Active', course?.trim() || null, studentId]
+      [
+        firstName.trim(), middleName?.trim() || null, surname.trim(),
+        trimmedEmail, alternativeEmail?.trim() || null,
+        mobile.trim(), landline?.trim() || null,
+        address.trim(), postalCode?.trim() || null,
+        country, formattedDob,
+        nationality?.trim() || null, maritalStatus || null, gender || null,
+        cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
+        passportNo?.trim() || null,
+        passportIssueDate ? passportIssueDate.split('T')[0] : null,
+        passportPlaceOfIssue?.trim() || null,
+        guardianName?.trim() || null, guardianRelation?.trim() || null,
+        guardianMobile?.trim() || null, guardianEmail?.trim() || null,
+        sourceInquiry || null, status || 'Active', course?.trim() || null,
+        studentId
+      ]
     );
-    
-    // Update education details
+
+    // Update emergency contact (upsert)
+    if (emergencyContact) {
+      const [existingEC] = await connection.query(
+        'SELECT id FROM student_emergency_contact WHERE student_id = ?', [studentId]
+      );
+      if (existingEC.length > 0) {
+        await connection.query(
+          `UPDATE student_emergency_contact SET full_name=?, relation=?, contact_no=?, email=?, address=?, postal_code=?
+           WHERE student_id=?`,
+          [emergencyContact.full_name || null, emergencyContact.relation || null,
+           emergencyContact.contact_no || null, emergencyContact.email || null,
+           emergencyContact.address || null, emergencyContact.postal_code || null,
+           studentId]
+        );
+      } else {
+        await connection.query(
+          `INSERT INTO student_emergency_contact (student_id, full_name, relation, contact_no, email, address, postal_code)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [studentId, emergencyContact.full_name || null, emergencyContact.relation || null,
+           emergencyContact.contact_no || null, emergencyContact.email || null,
+           emergencyContact.address || null, emergencyContact.postal_code || null]
+        );
+      }
+    }
+
+    // Update family details (delete + reinsert)
+    if (familyDetails && Array.isArray(familyDetails)) {
+      await connection.query('DELETE FROM student_family_details WHERE student_id = ?', [studentId]);
+      for (const member of familyDetails) {
+        if (member.type) {
+          await connection.query(
+            `INSERT INTO student_family_details (student_id, type, full_name, relation, contact_no, email, profession, address, sponsor_note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [studentId, member.type, member.full_name || null, member.relation || null,
+             member.contact_no || null, member.email || null, member.profession || null,
+             member.address || null, member.sponsor_note || null]
+          );
+        }
+      }
+    }
+
+    // Update education
     if (education && Array.isArray(education)) {
-      // Delete existing education records
       await connection.query('DELETE FROM student_education WHERE student_id = ?', [studentId]);
-      
-      // Insert new education records
       const educationValues = education
-        .filter(edu => edu.education_level && edu.institute_name && edu.start_date)
+        .filter(edu => edu.education_level && edu.institute_name)
         .map(edu => [
-          studentId,
-          edu.education_level,
-          edu.institute_name,
-          edu.start_date.split('T')[0], // Format start date
-          edu.end_date ? edu.end_date.split('T')[0] : null, // Format end date
-          edu.result || null,
-          edu.remarks || null
+          studentId, edu.education_level, edu.institute_name,
+          edu.start_date ? edu.start_date.split('T')[0] : null,
+          edu.end_date ? edu.end_date.split('T')[0] : null,
+          edu.result || null, edu.subjects || null, edu.cgpa || null, edu.remarks || null
         ]);
-      
       if (educationValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_education 
-           (student_id, education_level, institute_name, start_date, end_date, result, remarks)
+          `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, result, subjects, cgpa, remarks)
            VALUES ?`,
           [educationValues]
         );
       }
     }
-    
+
+    // Update activities
+    if (activities && Array.isArray(activities)) {
+      await connection.query('DELETE FROM student_activities WHERE student_id = ?', [studentId]);
+      const activityValues = activities
+        .filter(a => a.activity_name)
+        .map(a => [studentId, a.activity_name, a.description || null,
+          a.grade_levels || null, a.hours_per_week || null, a.weeks_per_year || null]);
+      if (activityValues.length > 0) {
+        await connection.query(
+          `INSERT INTO student_activities (student_id, activity_name, description, grade_levels, hours_per_week, weeks_per_year)
+           VALUES ?`,
+          [activityValues]
+        );
+      }
+    }
+
+    // Update awards
+    if (awards && Array.isArray(awards)) {
+      await connection.query('DELETE FROM student_awards WHERE student_id = ?', [studentId]);
+      const awardValues = awards
+        .filter(a => a.award_name)
+        .map(a => [studentId, a.award_name, a.recognition_level || null,
+          a.award_type || null, a.received_date || null, a.description || null]);
+      if (awardValues.length > 0) {
+        await connection.query(
+          `INSERT INTO student_awards (student_id, award_name, recognition_level, award_type, received_date, description)
+           VALUES ?`,
+          [awardValues]
+        );
+      }
+    }
+
     // Update work experience
     if (workExperience && Array.isArray(workExperience)) {
-      // Delete existing work experience records
       await connection.query('DELETE FROM student_work_experience WHERE student_id = ?', [studentId]);
-      
-      // Insert new work experience records
       const workValues = workExperience
-        .filter(work => work.company_name && work.designation)
-        .map(work => [
-            studentId,
-            work.company_name,
-            work.designation,
-            work.date_from ? work.date_from.split('T')[0] : null,
-            work.date_to ? work.date_to.split('T')[0] : null,
-            work.duration || null,
-            work.relation || null
-        ]);
-      
+        .filter(w => w.company_name && w.designation)
+        .map(w => [studentId, w.company_name, w.designation,
+          w.date_from ? w.date_from.split('T')[0] : null,
+          w.date_to ? w.date_to.split('T')[0] : null,
+          w.duration || null, w.employment_type || null, w.relation || null]);
       if (workValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_work_experience 
-          (student_id, company_name, designation, date_from, date_to, duration, relation)
-          VALUES ?`,
+          `INSERT INTO student_work_experience (student_id, company_name, designation, date_from, date_to, duration, employment_type, relation)
+           VALUES ?`,
           [workValues]
         );
       }
     }
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Student updated successfully'
-    });
-    
+    res.json({ success: true, message: 'Student updated successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error updating student:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while updating the student',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while updating the student' });
   } finally {
     connection.release();
   }
@@ -489,44 +567,26 @@ router.put('/students/:studentId', async (req, res) => {
 // Delete student
 router.delete('/students/:studentId', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
-    
-    // Check if student exists
+
     const [existingStudent] = await connection.query(
-      'SELECT id, name FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
+      'SELECT id, name FROM users WHERE id = ? AND role = ?', [studentId, 'client']
     );
-    
     if (existingStudent.length === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
-    // Delete student (cascade will handle related records)
+
     await connection.query('DELETE FROM users WHERE id = ?', [studentId]);
-    
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Student deleted successfully'
-    });
-    
+    res.json({ success: true, message: 'Student deleted successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error deleting student:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while deleting the student',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while deleting the student' });
   } finally {
     connection.release();
   }
@@ -534,97 +594,60 @@ router.delete('/students/:studentId', async (req, res) => {
 
 // ============ MANUAL FORM UPLOAD ============
 
-// Upload manual form for student
 router.post('/students/:studentId/manual-form', upload.single('manualForm'), async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
-    
+
     if (!req.file) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No file uploaded' 
-      });
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
-    
-    // Check if student exists
+
     const [student] = await connection.query(
-      'SELECT id, manual_form_path FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
+      'SELECT id, manual_form_path FROM users WHERE id = ? AND role = ?', [studentId, 'client']
     );
-    
     if (student.length === 0) {
       await connection.rollback();
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      if (req.file) fs.unlinkSync(req.file.path);
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
-    // Delete old file if exists
+
     if (student[0].manual_form_path) {
       const oldFilePath = path.join(__dirname, '..', student[0].manual_form_path);
-      if (fs.existsSync(oldFilePath)) {
-        fs.unlinkSync(oldFilePath);
-      }
+      if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
     }
-    
+
     const filePath = `/uploads/student-documents/${req.file.filename}`;
-    
-    // Update student record with manual form path
     await connection.query(
       'UPDATE users SET manual_form_path = ?, manual_form_uploaded_at = NOW() WHERE id = ?',
       [filePath, studentId]
     );
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Manual form uploaded successfully',
-      filePath: filePath
-    });
-    
+    res.json({ success: true, message: 'Manual form uploaded successfully', filePath });
+
   } catch (error) {
     await connection.rollback();
-    if (req.file) {
-      fs.unlinkSync(req.file.path);
-    }
+    if (req.file) fs.unlinkSync(req.file.path);
     console.error('Error uploading manual form:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while uploading the manual form',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while uploading the manual form' });
   } finally {
     connection.release();
   }
 });
 
-// Get manual form for student
 router.get('/students/:studentId/manual-form', async (req, res) => {
   try {
     const { studentId } = req.params;
-    
     const [result] = await pool.query(
       'SELECT manual_form_path, manual_form_uploaded_at FROM users WHERE id = ? AND role = ?',
       [studentId, 'client']
     );
-    
     if (result.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
     res.json({
       success: true,
       manualForm: result[0].manual_form_path ? {
@@ -632,75 +655,45 @@ router.get('/students/:studentId/manual-form', async (req, res) => {
         uploadedAt: result[0].manual_form_uploaded_at
       } : null
     });
-    
   } catch (error) {
     console.error('Error fetching manual form:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch manual form',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'Failed to fetch manual form' });
   }
 });
 
-// Delete manual form for student
 router.delete('/students/:studentId/manual-form', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
-    
-    // Get file path
+
     const [student] = await connection.query(
-      'SELECT manual_form_path FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
+      'SELECT manual_form_path FROM users WHERE id = ? AND role = ?', [studentId, 'client']
     );
-    
     if (student.length === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
     if (!student[0].manual_form_path) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No manual form found' 
-      });
+      return res.status(404).json({ success: false, message: 'No manual form found' });
     }
-    
-    // Delete file from filesystem
+
     const filePath = path.join(__dirname, '..', student[0].manual_form_path);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-    
-    // Update database
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
     await connection.query(
       'UPDATE users SET manual_form_path = NULL, manual_form_uploaded_at = NULL WHERE id = ?',
       [studentId]
     );
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Manual form deleted successfully'
-    });
-    
+    res.json({ success: true, message: 'Manual form deleted successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error deleting manual form:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while deleting the manual form',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while deleting the manual form' });
   } finally {
     connection.release();
   }
@@ -708,479 +701,328 @@ router.delete('/students/:studentId/manual-form', async (req, res) => {
 
 // ============ DOCUMENT MANAGEMENT ============
 
-// Upload student document
+const PREDEFINED_DOCUMENTS = [
+  { name: 'Passport', order: 1 },
+  { name: 'CNIC (Back & Front)', order: 2 },
+  { name: 'Updated CV / Resume', order: 3 },
+  { name: 'English Proficiency Test', order: 4 },
+  { name: 'Extracurricular Certificates', order: 5 },
+  { name: 'Essay or SOP', order: 6 },
+  { name: 'Birth Certificate', order: 7 },
+];
+
 router.post('/students/:studentId/documents', upload.single('document'), async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
-    const { documentName, documentType } = req.body;
-    
+    const { documentName, documentType, displayOrder } = req.body;
+
     if (!req.file) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No file uploaded' 
-      });
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
-    
     if (!documentName || !documentType) {
       await connection.rollback();
-      if (req.file) {
-        fs.unlinkSync(req.file.path);
-      }
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Document name and type are required' 
-      });
+      if (req.file) fs.unlinkSync(req.file.path);
+      return res.status(400).json({ success: false, message: 'Document name and type are required' });
     }
-    
+
     const filePath = `/uploads/student-documents/${req.file.filename}`;
-    
     await connection.query(
-      `INSERT INTO student_documents (student_id, document_name, document_type, file_path)
-       VALUES (?, ?, ?, ?)`,
-      [studentId, documentName, documentType, filePath]
+      `INSERT INTO student_documents (student_id, document_name, document_type, file_path, display_order)
+       VALUES (?, ?, ?, ?, ?)`,
+      [studentId, documentName, documentType, filePath, displayOrder || 99]
     );
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Document uploaded successfully',
-      filePath: filePath
-    });
-    
+    res.json({ success: true, message: 'Document uploaded successfully', filePath });
+
   } catch (error) {
     await connection.rollback();
-    if (req.file) {
-      fs.unlinkSync(req.file.path);
-    }
+    if (req.file) fs.unlinkSync(req.file.path);
     console.error('Error uploading document:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while uploading the document',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while uploading the document' });
   } finally {
     connection.release();
   }
 });
 
-// Update document verification status
 router.put('/students/:studentId/documents/:documentId', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId, documentId } = req.params;
     const { verified } = req.body;
-    
+
     await connection.query(
       'UPDATE student_documents SET verified = ? WHERE id = ? AND student_id = ?',
       [verified ? 1 : 0, documentId, studentId]
     );
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Document verification status updated'
-    });
-    
+    res.json({ success: true, message: 'Document verification status updated' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error updating document:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while updating the document',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while updating the document' });
   } finally {
     connection.release();
   }
 });
 
-// Delete document
 router.delete('/students/:studentId/documents/:documentId', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId, documentId } = req.params;
-    
-    // Get file path
+
     const [document] = await connection.query(
       'SELECT file_path FROM student_documents WHERE id = ? AND student_id = ?',
       [documentId, studentId]
     );
-    
     if (document.length === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Document not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Document not found' });
     }
-    
-    // Delete from database
+
     await connection.query(
-      'DELETE FROM student_documents WHERE id = ? AND student_id = ?',
-      [documentId, studentId]
+      'DELETE FROM student_documents WHERE id = ? AND student_id = ?', [documentId, studentId]
     );
-    
-    // Delete file from filesystem
+
     const filePath = path.join(__dirname, '..', document[0].file_path);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-    
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Document deleted successfully'
-    });
-    
+    res.json({ success: true, message: 'Document deleted successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error deleting document:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while deleting the document',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while deleting the document' });
   } finally {
     connection.release();
   }
 });
 
-// ============ COUNSELOR ASSIGNMENT FOR STUDENTS ============
+// ============ COUNSELOR ASSIGNMENT ============
 
-// Assign counselor to student
 router.post('/students/:studentId/assign-counselor', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
     const { counselorId } = req.body;
-    
+
     if (!counselorId) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Counselor ID is required' 
-      });
+      return res.status(400).json({ success: false, message: 'Counselor ID is required' });
     }
-    
-    // Check if already assigned
+
     const [existing] = await connection.query(
       'SELECT id FROM student_counselors WHERE user_id = ? AND counselor_id = ?',
       [studentId, counselorId]
     );
-    
     if (existing.length > 0) {
       await connection.rollback();
-      return res.status(409).json({ 
-        success: false, 
-        message: 'This counselor is already assigned to this student' 
-      });
+      return res.status(409).json({ success: false, message: 'This counselor is already assigned' });
     }
-    
-    // Assign counselor
+
     await connection.query(
-      'INSERT INTO student_counselors (user_id, counselor_id) VALUES (?, ?)',
-      [studentId, counselorId]
+      'INSERT INTO student_counselors (user_id, counselor_id) VALUES (?, ?)', [studentId, counselorId]
     );
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Counselor assigned successfully'
-    });
-    
+    res.json({ success: true, message: 'Counselor assigned successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error assigning counselor:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while assigning counselor',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while assigning counselor' });
   } finally {
     connection.release();
   }
 });
 
-// Remove counselor from student
 router.delete('/students/:studentId/counselors/:counselorId', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId, counselorId } = req.params;
-    
+
     const [result] = await connection.query(
       'DELETE FROM student_counselors WHERE user_id = ? AND counselor_id = ?',
       [studentId, counselorId]
     );
-    
     if (result.affectedRows === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Assignment not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Assignment not found' });
     }
-    
+
     await connection.commit();
-    
-    res.json({
-      success: true,
-      message: 'Counselor removed successfully'
-    });
-    
+    res.json({ success: true, message: 'Counselor removed successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error removing counselor:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while removing counselor',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while removing counselor' });
   } finally {
     connection.release();
   }
 });
 
-// ============ STUDENT MEETINGS ============
+// ============ MEETINGS ============
 
-// Schedule meeting for student
 router.post('/students/:studentId/meetings', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
     const { counselorId, meetingDate, meetingTime, durationMinutes, notes } = req.body;
-    
-    // Validate required fields
+
     if (!counselorId || !meetingDate || !meetingTime || !durationMinutes) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'All required fields must be provided' 
-      });
+      return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
-    
-    // Check if counselor is assigned to this student
+
     const [assignment] = await connection.query(
       'SELECT id FROM student_counselors WHERE user_id = ? AND counselor_id = ?',
       [studentId, counselorId]
     );
-    
     if (assignment.length === 0) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'This counselor is not assigned to this student' 
-      });
+      return res.status(400).json({ success: false, message: 'This counselor is not assigned to this student' });
     }
-    
-    // Get student info
+
     const [student] = await connection.query(
-      'SELECT name, student_id FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
+      'SELECT name, student_id FROM users WHERE id = ? AND role = ?', [studentId, 'client']
     );
-    
     if (student.length === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
-    // Check for time conflicts
+
     const [hours, minutes] = meetingTime.split(':');
     const startMinutes = parseInt(hours) * 60 + parseInt(minutes);
     const endMinutes = startMinutes + parseInt(durationMinutes);
-    
-    // Validate business hours (9 AM to 5 PM)
+
     if (startMinutes < 540 || endMinutes > 1020) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Meetings must be scheduled between 9:00 AM and 5:00 PM' 
-      });
+      return res.status(400).json({ success: false, message: 'Meetings must be scheduled between 9:00 AM and 5:00 PM' });
     }
-    
-    // Check for overlapping meetings
+
     const [conflicts] = await connection.query(
-      `SELECT id, meeting_time, duration_minutes
-       FROM counselor_meetings
-       WHERE counselor_id = ? 
-       AND meeting_date = ? 
-       AND status != 'Cancelled'`,
+      `SELECT id, meeting_time, duration_minutes FROM counselor_meetings
+       WHERE counselor_id = ? AND meeting_date = ? AND status != 'Cancelled'`,
       [counselorId, meetingDate]
     );
-    
+
     for (const meeting of conflicts) {
       const [mHours, mMinutes] = meeting.meeting_time.split(':');
       const mStart = parseInt(mHours) * 60 + parseInt(mMinutes);
       const mEnd = mStart + meeting.duration_minutes;
-      
       if ((startMinutes >= mStart && startMinutes < mEnd) ||
           (endMinutes > mStart && endMinutes <= mEnd) ||
           (startMinutes <= mStart && endMinutes >= mEnd)) {
         await connection.rollback();
-        return res.status(409).json({ 
-          success: false, 
-          message: `This time slot conflicts with an existing meeting from ${meeting.meeting_time} (${meeting.duration_minutes} minutes)` 
+        return res.status(409).json({
+          success: false,
+          message: `Time slot conflicts with an existing meeting at ${meeting.meeting_time}`
         });
       }
     }
-    
-    // Insert meeting
+
     await connection.query(
       `INSERT INTO counselor_meetings 
        (counselor_id, user_id, student_name, student_id, meeting_date, meeting_time, duration_minutes, status, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'Scheduled', ?)`,
-      [counselorId, studentId, student[0].name, student[0].student_id, meetingDate, meetingTime, durationMinutes, notes || null]
+      [counselorId, studentId, student[0].name, student[0].student_id,
+       meetingDate, meetingTime, durationMinutes, notes || null]
     );
-    
+
     await connection.commit();
-    
-    res.status(201).json({
-      success: true,
-      message: 'Meeting scheduled successfully'
-    });
-    
+    res.status(201).json({ success: true, message: 'Meeting scheduled successfully' });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error scheduling meeting:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while scheduling the meeting',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while scheduling the meeting' });
   } finally {
     connection.release();
   }
 });
 
-// Create multiple applications for student
+// ============ CREATE APPLICATIONS FOR STUDENT ============
+
 router.post('/students/:studentId/create-applications', async (req, res) => {
   const connection = await pool.getConnection();
-  
   try {
     await connection.beginTransaction();
-    
     const { studentId } = req.params;
     const { countryIds } = req.body;
-    
+
     if (!countryIds || !Array.isArray(countryIds) || countryIds.length === 0) {
       await connection.rollback();
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please provide at least one country ID' 
-      });
+      return res.status(400).json({ success: false, message: 'Please provide at least one country ID' });
     }
-    
-    // Get student info
+
     const [student] = await connection.query(
-      'SELECT id, name, student_id FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
+      'SELECT id, name, student_id FROM users WHERE id = ? AND role = ?', [studentId, 'client']
     );
-    
     if (student.length === 0) {
       await connection.rollback();
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Student not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Student not found' });
     }
-    
-    // Check for existing applications
+
     const [existingApps] = await connection.query(
       'SELECT country_id FROM applications WHERE student_id = ? AND country_id IN (?)',
       [studentId, countryIds]
     );
-    
     if (existingApps.length > 0) {
       const existingCountryIds = existingApps.map(app => app.country_id);
       await connection.rollback();
-      return res.status(409).json({ 
-        success: false, 
+      return res.status(409).json({
+        success: false,
         message: 'Applications already exist for some selected countries',
-        existingCountryIds: existingCountryIds
+        existingCountryIds
       });
     }
-    
+
     let createdCount = 0;
     const currentDate = new Date().toISOString().split('T')[0];
     const currentYear = new Date().getFullYear();
-    
-    // Create application for each country
+
     for (const countryId of countryIds) {
-      // Verify country exists
       const [country] = await connection.query(
-        'SELECT id, country_name FROM countries WHERE id = ? AND status = ?',
-        [countryId, 'Active']
+        'SELECT id, country_name FROM countries WHERE id = ? AND status = ?', [countryId, 'Active']
       );
-      
-      if (country.length === 0) {
-        continue; // Skip invalid countries
-      }
-      
-      // Generate application ID
+      if (country.length === 0) continue;
+
       const [result] = await connection.query(
         `SELECT MAX(CAST(SUBSTRING(application_id, 8) AS UNSIGNED)) as max_id 
-         FROM applications 
-         WHERE application_id LIKE ?`,
+         FROM applications WHERE application_id LIKE ?`,
         [`APP${currentYear}%`]
       );
-      
       const nextId = (result[0].max_id || 0) + 1;
       const applicationId = `APP${currentYear}${String(nextId).padStart(3, '0')}`;
-      
-      // Insert application with minimal data (country only, other fields can be filled later)
+
       await connection.query(
         `INSERT INTO applications 
-         (application_id, application_date, student_id, student_name, country_id, 
-          application_status, tagging_status)
+         (application_id, application_date, student_id, student_name, country_id, application_status, tagging_status)
          VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
         [applicationId, currentDate, studentId, student[0].name, countryId]
       );
-      
       createdCount++;
     }
-    
+
     await connection.commit();
-    
-    res.status(201).json({
-      success: true,
-      message: `Successfully created application(s)`,
-      createdCount: createdCount
-    });
-    
+    res.status(201).json({ success: true, message: 'Applications created successfully', createdCount });
+
   } catch (error) {
     await connection.rollback();
     console.error('Error creating applications:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'An error occurred while creating applications',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ success: false, message: 'An error occurred while creating applications' });
   } finally {
     connection.release();
   }
