@@ -150,22 +150,25 @@ router.get('/visas/statistics', async (req, res) => {
     const [stats] = await pool.query(`
       SELECT 
         COUNT(*) as total,
-        SUM(CASE WHEN visa_status = 'Pending' THEN 1 ELSE 0 END) as pending,
-        SUM(CASE WHEN visa_status = 'Approved' THEN 1 ELSE 0 END) as approved,
-        SUM(CASE WHEN visa_status = 'Rejected' THEN 1 ELSE 0 END) as rejected,
-        SUM(CASE WHEN visa_appointment_date >= CURDATE() AND visa_appointment_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) as upcoming_appointments
+        SUM(CASE WHEN visa_status = 'To be applied' THEN 1 ELSE 0 END) as to_be_applied,
+        SUM(CASE WHEN visa_status = 'In Progress'   THEN 1 ELSE 0 END) as in_progress,
+        SUM(CASE WHEN visa_status = 'Approved'      THEN 1 ELSE 0 END) as approved,
+        SUM(CASE WHEN visa_status = 'Rejected'      THEN 1 ELSE 0 END) as rejected,
+        SUM(CASE WHEN visa_appointment_date >= CURDATE() 
+                  AND visa_appointment_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY) 
+             THEN 1 ELSE 0 END) as upcoming_appointments
       FROM visas
     `);
-    
+
     res.json({
       success: true,
       statistics: stats[0]
     });
-    
+
   } catch (error) {
     console.error('Error fetching statistics:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Failed to fetch statistics',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
