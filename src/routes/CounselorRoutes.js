@@ -29,10 +29,12 @@ router.get('/counselors', async (req, res) => {
   try {
     const [counselors] = await pool.query(
       `SELECT c.*, 
+              COUNT(DISTINCT sc.user_id) as number_of_students,
               COUNT(DISTINCT cm.id) as total_meetings,
               COUNT(DISTINCT CASE WHEN cm.status = 'Scheduled' THEN cm.id END) as scheduled_meetings,
               COUNT(DISTINCT CASE WHEN cm.status = 'Completed' THEN cm.id END) as completed_meetings
        FROM counselors c
+       LEFT JOIN student_counselors sc ON c.id = sc.counselor_id
        LEFT JOIN counselor_meetings cm ON c.id = cm.counselor_id
        GROUP BY c.id
        ORDER BY c.created_at DESC`
@@ -53,6 +55,7 @@ router.get('/counselors', async (req, res) => {
     });
   }
 });
+
 
 // Get single counselor by ID with meetings
 router.get('/counselors/:counselorId', async (req, res) => {
