@@ -558,11 +558,24 @@ router.get('/dashboard/stats', async (req, res) => {
 router.get('/dashboard/recent-applications', async (req, res) => {
   try {
     const [applications] = await pool.query(
-      `SELECT a.id, a.application_id, a.program, a.application_status, a.created_at,
-              u.name as student_name, c.country_name
+      `SELECT 
+         a.id, 
+         a.application_id, 
+         a.program, 
+         a.application_status, 
+         a.created_at,
+         u.name as student_name,
+         u.student_id as student_number,
+         c.country_name,
+         GROUP_CONCAT(DISTINCT co.name ORDER BY co.name SEPARATOR ', ') as counselor_names
        FROM applications a
        INNER JOIN users u ON a.student_id = u.id
        INNER JOIN countries c ON a.country_id = c.id
+       LEFT JOIN student_counselors sc ON sc.user_id = a.student_id
+       LEFT JOIN counselors co ON co.id = sc.counselor_id
+       GROUP BY 
+         a.id, a.application_id, a.program, a.application_status, 
+         a.created_at, u.name, u.student_id, c.country_name
        ORDER BY a.created_at DESC
        LIMIT 10`
     );
