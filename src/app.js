@@ -12,6 +12,7 @@ import universityRoutes from './routes/universityRoutes.js';
 import intakeRoutes from './routes/intakeRoutes.js';
 import ApplicationRoutes from './routes/ApplicationRoutes.js';
 import VisaRoutes from './routes/VisaRoutes.js';
+import FinanceRoutes from './routes/FinanceRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +43,7 @@ app.use('/', universityRoutes);
 app.use('/', intakeRoutes);
 app.use('/', ApplicationRoutes);
 app.use('/', VisaRoutes);
+app.use('/', FinanceRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
