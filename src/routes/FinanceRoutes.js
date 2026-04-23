@@ -21,7 +21,6 @@ const generateInvoiceId = async (connection) => {
 // BANK ACCOUNTS
 // ============================================================
 
-// GET all bank accounts
 router.get('/finance/bank-accounts', async (req, res) => {
   try {
     const [accounts] = await pool.query(
@@ -49,13 +48,10 @@ router.get('/finance/bank-accounts', async (req, res) => {
   }
 });
 
-// GET single bank account
 router.get('/finance/bank-accounts/:accountId', async (req, res) => {
   try {
     const { accountId } = req.params;
-    const [accounts] = await pool.query(
-      'SELECT * FROM bank_accounts WHERE id = ?', [accountId]
-    );
+    const [accounts] = await pool.query('SELECT * FROM bank_accounts WHERE id = ?', [accountId]);
     if (accounts.length === 0) {
       return res.status(404).json({ success: false, message: 'Bank account not found' });
     }
@@ -66,7 +62,6 @@ router.get('/finance/bank-accounts/:accountId', async (req, res) => {
   }
 });
 
-// POST create bank account
 router.post('/finance/bank-accounts', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -98,7 +93,6 @@ router.post('/finance/bank-accounts', async (req, res) => {
   }
 });
 
-// PUT update bank account
 router.put('/finance/bank-accounts/:accountId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -137,7 +131,6 @@ router.put('/finance/bank-accounts/:accountId', async (req, res) => {
   }
 });
 
-// DELETE bank account
 router.delete('/finance/bank-accounts/:accountId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -166,6 +159,228 @@ router.delete('/finance/bank-accounts/:accountId', async (req, res) => {
 });
 
 // ============================================================
+// DEFAULT SERVICES
+// ============================================================
+
+router.get('/finance/default-services', async (req, res) => {
+  try {
+    const [services] = await pool.query(
+      'SELECT * FROM invoice_default_services WHERE is_active = 1 ORDER BY display_order ASC, id ASC'
+    );
+    res.json({ success: true, services });
+  } catch (error) {
+    console.error('Error fetching default services:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch default services' });
+  }
+});
+
+router.post('/finance/default-services', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { serviceName, displayOrder } = req.body;
+
+    if (!serviceName || !serviceName.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Service name is required' });
+    }
+
+    const [result] = await connection.query(
+      'INSERT INTO invoice_default_services (service_name, display_order) VALUES (?, ?)',
+      [serviceName.trim(), displayOrder || 99]
+    );
+    await connection.commit();
+    res.status(201).json({ success: true, message: 'Default service added', serviceId: result.insertId });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error adding default service:', error);
+    res.status(500).json({ success: false, message: 'Failed to add default service' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.put('/finance/default-services/:serviceId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { serviceId } = req.params;
+    const { serviceName, displayOrder } = req.body;
+
+    if (!serviceName || !serviceName.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Service name is required' });
+    }
+
+    const [existing] = await connection.query('SELECT id FROM invoice_default_services WHERE id = ?', [serviceId]);
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Service not found' });
+    }
+
+    await connection.query(
+      'UPDATE invoice_default_services SET service_name=?, display_order=? WHERE id=?',
+      [serviceName.trim(), displayOrder || 99, serviceId]
+    );
+    await connection.commit();
+    res.json({ success: true, message: 'Default service updated' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating default service:', error);
+    res.status(500).json({ success: false, message: 'Failed to update default service' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.delete('/finance/default-services/:serviceId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { serviceId } = req.params;
+
+    const [existing] = await connection.query('SELECT id FROM invoice_default_services WHERE id = ?', [serviceId]);
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Service not found' });
+    }
+
+    await connection.query('DELETE FROM invoice_default_services WHERE id = ?', [serviceId]);
+    await connection.commit();
+    res.json({ success: true, message: 'Default service deleted' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting default service:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete default service' });
+  } finally {
+    connection.release();
+  }
+});
+
+// ============================================================
+// AGENTS
+// ============================================================
+
+router.get('/finance/agents', async (req, res) => {
+  try {
+    const [agents] = await pool.query(
+      `SELECT a.*,
+        (SELECT COUNT(*) FROM invoices i WHERE i.agent_id = a.id) as total_invoices
+       FROM agents a
+       ORDER BY a.agent_name ASC`
+    );
+    res.json({ success: true, agents });
+  } catch (error) {
+    console.error('Error fetching agents:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch agents' });
+  }
+});
+
+router.post('/finance/agents', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { agentName, companyName, email, phone, address, status, notes } = req.body;
+
+    if (!agentName || !agentName.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Agent name is required' });
+    }
+
+    const [result] = await connection.query(
+      `INSERT INTO agents (agent_name, company_name, email, phone, address, status, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        agentName.trim(),
+        companyName?.trim() || null,
+        email?.trim() || null,
+        phone?.trim() || null,
+        address?.trim() || null,
+        status || 'Active',
+        notes?.trim() || null
+      ]
+    );
+    await connection.commit();
+    res.status(201).json({ success: true, message: 'Agent created', agentId: result.insertId });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating agent:', error);
+    res.status(500).json({ success: false, message: 'Failed to create agent' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.put('/finance/agents/:agentId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { agentId } = req.params;
+    const { agentName, companyName, email, phone, address, status, notes } = req.body;
+
+    if (!agentName || !agentName.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Agent name is required' });
+    }
+
+    const [existing] = await connection.query('SELECT id FROM agents WHERE id = ?', [agentId]);
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Agent not found' });
+    }
+
+    await connection.query(
+      `UPDATE agents SET agent_name=?, company_name=?, email=?, phone=?, address=?, status=?, notes=? WHERE id=?`,
+      [
+        agentName.trim(),
+        companyName?.trim() || null,
+        email?.trim() || null,
+        phone?.trim() || null,
+        address?.trim() || null,
+        status || 'Active',
+        notes?.trim() || null,
+        agentId
+      ]
+    );
+    await connection.commit();
+    res.json({ success: true, message: 'Agent updated' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating agent:', error);
+    res.status(500).json({ success: false, message: 'Failed to update agent' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.delete('/finance/agents/:agentId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { agentId } = req.params;
+
+    const [existing] = await connection.query('SELECT id FROM agents WHERE id = ?', [agentId]);
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Agent not found' });
+    }
+
+    await connection.query('DELETE FROM agents WHERE id = ?', [agentId]);
+    await connection.commit();
+    res.json({ success: true, message: 'Agent deleted' });
+  } catch (error) {
+    await connection.rollback();
+    if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+      return res.status(400).json({ success: false, message: 'Cannot delete agent as they have invoices linked' });
+    }
+    console.error('Error deleting agent:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete agent' });
+  } finally {
+    connection.release();
+  }
+});
+
+// ============================================================
 // FINANCE STATISTICS
 // ============================================================
 router.get('/finance/statistics', async (req, res) => {
@@ -177,11 +392,10 @@ router.get('/finance/statistics', async (req, res) => {
     const [stats] = await pool.query(
       `SELECT
         COUNT(*) as total_invoices,
-        COALESCE(SUM(CASE WHEN payment_status = 'Paid' THEN final_amount ELSE 0 END), 0) as total_credit,
-        COALESCE(SUM(CASE WHEN payment_status IN ('Pending','Partially Paid') THEN final_amount ELSE 0 END), 0) as total_debit,
-        COALESCE(SUM(CASE WHEN payment_status IN ('Pending','Partially Paid') THEN final_amount - paid_amount ELSE 0 END), 0) as total_pending,
-        COALESCE(SUM(CASE WHEN invoice_type = 'Student' AND payment_status = 'Paid' THEN final_amount ELSE 0 END), 0) as student_credit,
-        COALESCE(SUM(CASE WHEN invoice_type = 'University Commission' AND payment_status = 'Paid' THEN final_amount ELSE 0 END), 0) as commission_credit,
+        COALESCE(SUM(CASE WHEN payment_status = 'Paid' AND invoice_type != 'Agent Commission' THEN final_amount ELSE 0 END), 0) as total_credit,
+        COALESCE(SUM(CASE WHEN payment_status IN ('Pending','Partially Paid') AND invoice_type != 'Agent Commission' THEN final_amount ELSE 0 END), 0) as total_debit,
+        COALESCE(SUM(CASE WHEN payment_status IN ('Pending','Partially Paid') AND invoice_type != 'Agent Commission' THEN final_amount - COALESCE(paid_amount,0) ELSE 0 END), 0) as total_pending,
+        COALESCE(SUM(CASE WHEN invoice_type = 'Agent Commission' THEN final_amount ELSE 0 END), 0) as total_agent_payout,
         COUNT(CASE WHEN payment_status = 'Pending' THEN 1 END) as pending_count,
         COUNT(CASE WHEN payment_status = 'Paid' THEN 1 END) as paid_count
        FROM invoices
@@ -189,11 +403,11 @@ router.get('/finance/statistics', async (req, res) => {
       [targetMonth, targetYear]
     );
 
-    // Per-bank stats
     const [bankStats] = await pool.query(
       `SELECT ba.id, ba.account_name, ba.bank_name, ba.currency,
-        COALESCE(SUM(CASE WHEN i.payment_status = 'Paid' THEN i.final_amount ELSE 0 END), 0) as credit,
-        COALESCE(SUM(CASE WHEN i.payment_status IN ('Pending','Partially Paid') THEN i.final_amount - i.paid_amount ELSE 0 END), 0) as pending,
+        COALESCE(SUM(CASE WHEN i.payment_status = 'Paid' AND i.invoice_type != 'Agent Commission' THEN i.final_amount ELSE 0 END), 0) as credit,
+        COALESCE(SUM(CASE WHEN i.payment_status IN ('Pending','Partially Paid') AND i.invoice_type != 'Agent Commission' THEN i.final_amount - COALESCE(i.paid_amount,0) ELSE 0 END), 0) as pending,
+        COALESCE(SUM(CASE WHEN i.invoice_type = 'Agent Commission' THEN i.final_amount ELSE 0 END), 0) as agent_payout,
         COUNT(i.id) as invoice_count
        FROM bank_accounts ba
        LEFT JOIN invoices i ON ba.id = i.bank_account_id
@@ -215,7 +429,6 @@ router.get('/finance/statistics', async (req, res) => {
 // INVOICES
 // ============================================================
 
-// GET all invoices
 router.get('/finance/invoices', async (req, res) => {
   try {
     const { type, status, month, year, bankAccountId } = req.query;
@@ -223,43 +436,36 @@ router.get('/finance/invoices', async (req, res) => {
     let whereClause = 'WHERE 1=1';
     const params = [];
 
-    if (type) {
-      whereClause += ' AND i.invoice_type = ?';
-      params.push(type);
-    }
-    if (status) {
-      whereClause += ' AND i.payment_status = ?';
-      params.push(status);
-    }
-    if (month) {
-      whereClause += ' AND MONTH(i.invoice_date) = ?';
-      params.push(month);
-    }
-    if (year) {
-      whereClause += ' AND YEAR(i.invoice_date) = ?';
-      params.push(year);
-    }
-    if (bankAccountId) {
-      whereClause += ' AND i.bank_account_id = ?';
-      params.push(bankAccountId);
-    }
+    if (type) { whereClause += ' AND i.invoice_type = ?'; params.push(type); }
+    if (status) { whereClause += ' AND i.payment_status = ?'; params.push(status); }
+    if (month) { whereClause += ' AND MONTH(i.invoice_date) = ?'; params.push(month); }
+    if (year) { whereClause += ' AND YEAR(i.invoice_date) = ?'; params.push(year); }
+    if (bankAccountId) { whereClause += ' AND i.bank_account_id = ?'; params.push(bankAccountId); }
 
     const [invoices] = await pool.query(
       `SELECT i.*,
-              ba.account_name, ba.bank_name, ba.currency
+              ba.account_name, ba.bank_name, ba.currency,
+              a.agent_name
        FROM invoices i
        LEFT JOIN bank_accounts ba ON i.bank_account_id = ba.id
+       LEFT JOIN agents a ON i.agent_id = a.id
        ${whereClause}
        ORDER BY i.created_at DESC`,
       params
     );
 
-    // Attach extra services for each invoice
     for (const inv of invoices) {
       const [extras] = await pool.query(
         'SELECT * FROM invoice_extra_services WHERE invoice_id = ?', [inv.id]
       );
       inv.extra_services = extras;
+
+      if (inv.invoice_type === 'Agent Commission') {
+        const [agentStudents] = await pool.query(
+          'SELECT * FROM invoice_agent_students WHERE invoice_id = ?', [inv.id]
+        );
+        inv.agent_students = agentStudents;
+      }
     }
 
     res.json({ success: true, invoices, total: invoices.length });
@@ -269,15 +475,16 @@ router.get('/finance/invoices', async (req, res) => {
   }
 });
 
-// GET single invoice
 router.get('/finance/invoices/:invoiceId', async (req, res) => {
   try {
     const { invoiceId } = req.params;
 
     const [invoices] = await pool.query(
-      `SELECT i.*, ba.account_name, ba.bank_name, ba.account_number, ba.iban, ba.branch_name, ba.currency
+      `SELECT i.*, ba.account_name, ba.bank_name, ba.account_number, ba.iban, ba.branch_name, ba.currency,
+              a.agent_name, a.company_name as agent_company
        FROM invoices i
        LEFT JOIN bank_accounts ba ON i.bank_account_id = ba.id
+       LEFT JOIN agents a ON i.agent_id = a.id
        WHERE i.id = ?`,
       [invoiceId]
     );
@@ -292,12 +499,26 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
     const [countryServices] = await pool.query(
       'SELECT * FROM invoice_country_services WHERE invoice_id = ?', [invoiceId]
     );
+    const [agentStudents] = await pool.query(
+      'SELECT * FROM invoice_agent_students WHERE invoice_id = ?', [invoiceId]
+    );
+
+    // Fetch default services only for Student invoices
+    let defaultServices = [];
+    if (invoices[0].invoice_type === 'Student') {
+      const [ds] = await pool.query(
+        'SELECT * FROM invoice_default_services WHERE is_active = 1 ORDER BY display_order ASC'
+      );
+      defaultServices = ds;
+    }
 
     res.json({
       success: true,
       invoice: invoices[0],
       extraServices,
-      countryServices
+      countryServices,
+      agentStudents,
+      defaultServices
     });
   } catch (error) {
     console.error('Error fetching invoice:', error);
@@ -305,7 +526,6 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
   }
 });
 
-// POST create invoice
 router.post('/finance/invoices', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -315,8 +535,10 @@ router.post('/finance/invoices', async (req, res) => {
       invoiceType, invoiceDate, dueDate, bankAccountId,
       studentId, visaId,
       universityName, commissionReference,
+      agentId, agentCommissionPercent, agentStudents,
       baseAmount, discount, extraServices, selectedCountryServices,
-      finalAmount, notes
+      finalAmount, gstPercent, gstAmount,
+      notes
     } = req.body;
 
     if (!invoiceType || !invoiceDate || !bankAccountId) {
@@ -324,19 +546,17 @@ router.post('/finance/invoices', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invoice type, date, and bank account are required' });
     }
 
-    // Validate bank account
     const [bank] = await connection.query('SELECT id FROM bank_accounts WHERE id = ? AND status = ?', [bankAccountId, 'Active']);
     if (bank.length === 0) {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Bank account not found or inactive' });
     }
 
-    // Fetch student info
     let studentName = null, studentRefId = null, studentEmail = null, studentMobile = null, studentCountry = null;
-    if (studentId) {
+    if (studentId && invoiceType !== 'Agent Commission') {
       const [students] = await connection.query(
-        'SELECT name, middle_name, surname, student_id, email, mobile, country FROM users WHERE id = ? AND role = ?',
-        [studentId, 'client']
+        'SELECT name, middle_name, surname, student_id, email, mobile, country FROM users WHERE id = ?',
+        [studentId]
       );
       if (students.length > 0) {
         const s = students[0];
@@ -348,30 +568,31 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
-    // Fetch visa info
     let visaRefId = null, visaType = null, visaCountry = null;
     if (visaId) {
       const [visas] = await connection.query(
-        `SELECT v.visa_id, v.visa_type, c.country_name
-         FROM visas v
-         LEFT JOIN countries c ON v.student_id = (
-           SELECT u.id FROM users u WHERE u.id = v.student_id
-         )
-         WHERE v.id = ?`,
-        [visaId]
+        'SELECT visa_id, visa_type FROM visas WHERE id = ?', [visaId]
       );
       if (visas.length > 0) {
         visaRefId = visas[0].visa_id;
         visaType = visas[0].visa_type;
       }
-      // Also get country from visa's student country
       if (studentCountry) visaCountry = studentCountry;
     }
 
-    // Calculate extra services total
     const extrasTotal = Array.isArray(extraServices)
       ? extraServices.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0)
       : 0;
+
+    // For Agent Commission, compute commission amount
+    const commissionPercent = parseFloat(agentCommissionPercent) || 0;
+    const totalBase = parseFloat(baseAmount) || 0;
+    const commissionAmount = invoiceType === 'Agent Commission'
+      ? (totalBase * commissionPercent / 100)
+      : null;
+
+    const resolvedGstPercent = parseFloat(gstPercent) || 0;
+    const resolvedGstAmount = parseFloat(gstAmount) || 0;
 
     const invoiceId = await generateInvoiceId(connection);
 
@@ -381,25 +602,31 @@ router.post('/finance/invoices', async (req, res) => {
         student_id, student_name, student_ref_id, student_email, student_mobile, student_country,
         visa_id, visa_ref_id, visa_type, visa_country,
         university_name, commission_reference,
+        agent_id, agent_commission_percent, agent_commission_amount,
         base_amount, discount, extra_services_total, final_amount,
+        gst_percent, gst_amount,
         payment_status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
       [
         invoiceId, invoiceType, invoiceDate, dueDate || null, bankAccountId,
         studentId || null, studentName, studentRefId, studentEmail, studentMobile, studentCountry,
         visaId || null, visaRefId, visaType, visaCountry,
         universityName || null, commissionReference || null,
-        parseFloat(baseAmount) || 0,
+        agentId || null,
+        commissionPercent || null,
+        invoiceType === 'Agent Commission' ? commissionAmount : null,
+        totalBase,
         parseFloat(discount) || 0,
         extrasTotal,
         parseFloat(finalAmount) || 0,
+        resolvedGstPercent,
+        resolvedGstAmount,
         notes || null
       ]
     );
 
     const newInvoiceId = result.insertId;
 
-    // Insert extra services
     if (Array.isArray(extraServices) && extraServices.length > 0) {
       for (const svc of extraServices) {
         if (svc.name && svc.price !== undefined) {
@@ -411,12 +638,20 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
-    // Insert selected country services (no price)
     if (Array.isArray(selectedCountryServices) && selectedCountryServices.length > 0) {
       for (const cs of selectedCountryServices) {
         await connection.query(
           'INSERT INTO invoice_country_services (invoice_id, country_service_id, service_name) VALUES (?, ?, ?)',
           [newInvoiceId, cs.id, cs.service_name]
+        );
+      }
+    }
+
+    if (invoiceType === 'Agent Commission' && Array.isArray(agentStudents) && agentStudents.length > 0) {
+      for (const s of agentStudents) {
+        await connection.query(
+          'INSERT INTO invoice_agent_students (invoice_id, student_id, student_name, student_ref_id) VALUES (?, ?, ?, ?)',
+          [newInvoiceId, s.id, s.student_name, s.student_ref_id]
         );
       }
     }
@@ -437,13 +672,19 @@ router.post('/finance/invoices', async (req, res) => {
   }
 });
 
-// PUT update invoice status / payment
+// PUT update invoice (payment + editable fields)
 router.put('/finance/invoices/:invoiceId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
     const { invoiceId } = req.params;
-    const { paymentStatus, paidAmount, paymentDate, notes } = req.body;
+    const {
+      paymentStatus, paidAmount, paymentDate,
+      bankAccountId, baseAmount, discount, gstPercent, gstAmount, finalAmount,
+      invoiceDate, dueDate, universityName, commissionReference,
+      agentId, agentCommissionPercent, agentCommissionAmount,
+      notes
+    } = req.body;
 
     const [existing] = await connection.query('SELECT id FROM invoices WHERE id = ?', [invoiceId]);
     if (existing.length === 0) {
@@ -452,11 +693,40 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
     }
 
     await connection.query(
-      `UPDATE invoices SET payment_status=?, paid_amount=?, payment_date=?, notes=? WHERE id=?`,
+      `UPDATE invoices SET
+        payment_status=?, paid_amount=?, payment_date=?,
+        bank_account_id=COALESCE(?,bank_account_id),
+        base_amount=COALESCE(?,base_amount),
+        discount=COALESCE(?,discount),
+        gst_percent=COALESCE(?,gst_percent),
+        gst_amount=COALESCE(?,gst_amount),
+        final_amount=COALESCE(?,final_amount),
+        invoice_date=COALESCE(?,invoice_date),
+        due_date=?,
+        university_name=COALESCE(?,university_name),
+        commission_reference=COALESCE(?,commission_reference),
+        agent_id=?,
+        agent_commission_percent=?,
+        agent_commission_amount=?,
+        notes=?
+       WHERE id=?`,
       [
         paymentStatus || 'Pending',
         parseFloat(paidAmount) || 0,
         paymentDate || null,
+        bankAccountId || null,
+        baseAmount != null ? parseFloat(baseAmount) : null,
+        discount != null ? parseFloat(discount) : null,
+        gstPercent != null ? parseFloat(gstPercent) : null,
+        gstAmount != null ? parseFloat(gstAmount) : null,
+        finalAmount != null ? parseFloat(finalAmount) : null,
+        invoiceDate || null,
+        dueDate || null,
+        universityName || null,
+        commissionReference || null,
+        agentId || null,
+        agentCommissionPercent != null ? parseFloat(agentCommissionPercent) : null,
+        agentCommissionAmount != null ? parseFloat(agentCommissionAmount) : null,
         notes || null,
         invoiceId
       ]
@@ -473,7 +743,6 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
   }
 });
 
-// DELETE invoice
 router.delete('/finance/invoices/:invoiceId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -499,10 +768,9 @@ router.delete('/finance/invoices/:invoiceId', async (req, res) => {
 });
 
 // ============================================================
-// COUNTRY SERVICES (under countries module)
+// COUNTRY SERVICES
 // ============================================================
 
-// GET all services for a country
 router.get('/countries/:countryId/services', async (req, res) => {
   try {
     const { countryId } = req.params;
@@ -517,7 +785,6 @@ router.get('/countries/:countryId/services', async (req, res) => {
   }
 });
 
-// POST add service to country
 router.post('/countries/:countryId/services', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -551,7 +818,6 @@ router.post('/countries/:countryId/services', async (req, res) => {
   }
 });
 
-// PUT update country service
 router.put('/countries/:countryId/services/:serviceId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -587,7 +853,6 @@ router.put('/countries/:countryId/services/:serviceId', async (req, res) => {
   }
 });
 
-// DELETE country service
 router.delete('/countries/:countryId/services/:serviceId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -614,7 +879,7 @@ router.delete('/countries/:countryId/services/:serviceId', async (req, res) => {
   }
 });
 
-// GET student visas (for invoice creation dropdown)
+// GET student visas
 router.get('/finance/student-visas/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
