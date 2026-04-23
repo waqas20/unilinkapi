@@ -692,6 +692,12 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
+    // Safe parser: returns null for anything that isn't a finite number
+    const safeFloat = (v) => {
+      const n = parseFloat(v);
+      return isFinite(n) ? n : null;
+    };
+
     await connection.query(
       `UPDATE invoices SET
         payment_status=?, paid_amount=?, payment_date=?,
@@ -712,21 +718,21 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
        WHERE id=?`,
       [
         paymentStatus || 'Pending',
-        parseFloat(paidAmount) || 0,
+        safeFloat(paidAmount) ?? 0,
         paymentDate || null,
-        bankAccountId || null,
-        baseAmount != null ? parseFloat(baseAmount) : null,
-        discount != null ? parseFloat(discount) : null,
-        gstPercent != null ? parseFloat(gstPercent) : null,
-        gstAmount != null ? parseFloat(gstAmount) : null,
-        finalAmount != null ? parseFloat(finalAmount) : null,
+        safeFloat(bankAccountId),
+        safeFloat(baseAmount),
+        safeFloat(discount),
+        safeFloat(gstPercent),
+        safeFloat(gstAmount),
+        safeFloat(finalAmount),
         invoiceDate || null,
         dueDate || null,
         universityName || null,
         commissionReference || null,
         agentId || null,
-        agentCommissionPercent != null ? parseFloat(agentCommissionPercent) : null,
-        agentCommissionAmount != null ? parseFloat(agentCommissionAmount) : null,
+        safeFloat(agentCommissionPercent),
+        safeFloat(agentCommissionAmount),
         notes || null,
         invoiceId
       ]
