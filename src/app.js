@@ -21,7 +21,10 @@ const app = express();
 
 // Simple CORS - same domain now, but keep for local development
 app.use(cors({
-  origin: 'https://unilink.cyb360.com',
+  origin: [
+    'https://unilink.cyb360.com',
+    'http://localhost:3000'
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
