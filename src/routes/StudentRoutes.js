@@ -141,25 +141,21 @@ router.get('/students/:studentId', async (req, res) => {
       [studentId]
     );
 
-    // Get emergency contact
     const [emergencyContacts] = await pool.query(
       'SELECT * FROM student_emergency_contact WHERE student_id = ? LIMIT 1',
       [studentId]
     );
 
-    // Get family details
     const [familyDetails] = await pool.query(
       'SELECT * FROM student_family_details WHERE student_id = ? ORDER BY FIELD(type, "Father","Mother","Sponsor")',
       [studentId]
     );
 
-    // Get activities
     const [activities] = await pool.query(
       'SELECT * FROM student_activities WHERE student_id = ? ORDER BY id ASC',
       [studentId]
     );
 
-    // Get awards
     const [awards] = await pool.query(
       'SELECT * FROM student_awards WHERE student_id = ? ORDER BY id ASC',
       [studentId]
@@ -260,7 +256,6 @@ router.post('/students', async (req, res) => {
 
     const newStudentId = result.insertId;
 
-    // Insert emergency contact
     if (emergencyContact && (emergencyContact.full_name || emergencyContact.contact_no)) {
       await connection.query(
         `INSERT INTO student_emergency_contact (student_id, full_name, relation, contact_no, email, address, postal_code)
@@ -271,7 +266,6 @@ router.post('/students', async (req, res) => {
       );
     }
 
-    // Insert family details
     if (familyDetails && Array.isArray(familyDetails)) {
       for (const member of familyDetails) {
         if (member.type && (member.full_name || member.contact_no)) {
@@ -286,7 +280,6 @@ router.post('/students', async (req, res) => {
       }
     }
 
-    // Insert education
     if (education && Array.isArray(education) && education.length > 0) {
       const educationValues = education
         .filter(edu => edu.education_level && edu.institute_name)
@@ -304,7 +297,6 @@ router.post('/students', async (req, res) => {
       }
     }
 
-    // Insert activities
     if (activities && Array.isArray(activities) && activities.length > 0) {
       const activityValues = activities
         .filter(a => a.activity_name)
@@ -319,7 +311,6 @@ router.post('/students', async (req, res) => {
       }
     }
 
-    // Insert awards
     if (awards && Array.isArray(awards) && awards.length > 0) {
       const awardValues = awards
         .filter(a => a.award_name)
@@ -334,7 +325,6 @@ router.post('/students', async (req, res) => {
       }
     }
 
-    // Insert work experience
     if (workExperience && Array.isArray(workExperience) && workExperience.length > 0) {
       const workValues = workExperience
         .filter(w => w.company_name && w.designation)
@@ -412,7 +402,6 @@ router.put('/students/:studentId', async (req, res) => {
       return res.status(409).json({ success: false, message: 'Email already associated with another user' });
     }
 
-    // Update users table
     await connection.query(
       `UPDATE users SET
         name = ?, middle_name = ?, surname = ?, email = ?, alternative_email = ?,
@@ -441,7 +430,6 @@ router.put('/students/:studentId', async (req, res) => {
       ]
     );
 
-    // Update emergency contact (upsert)
     if (emergencyContact) {
       const [existingEC] = await connection.query(
         'SELECT id FROM student_emergency_contact WHERE student_id = ?', [studentId]
@@ -466,7 +454,6 @@ router.put('/students/:studentId', async (req, res) => {
       }
     }
 
-    // Update family details (delete + reinsert)
     if (familyDetails && Array.isArray(familyDetails)) {
       await connection.query('DELETE FROM student_family_details WHERE student_id = ?', [studentId]);
       for (const member of familyDetails) {
@@ -482,7 +469,6 @@ router.put('/students/:studentId', async (req, res) => {
       }
     }
 
-    // Update education
     if (education && Array.isArray(education)) {
       await connection.query('DELETE FROM student_education WHERE student_id = ?', [studentId]);
       const educationValues = education
@@ -502,7 +488,6 @@ router.put('/students/:studentId', async (req, res) => {
       }
     }
 
-    // Update activities
     if (activities && Array.isArray(activities)) {
       await connection.query('DELETE FROM student_activities WHERE student_id = ?', [studentId]);
       const activityValues = activities
@@ -518,7 +503,6 @@ router.put('/students/:studentId', async (req, res) => {
       }
     }
 
-    // Update awards
     if (awards && Array.isArray(awards)) {
       await connection.query('DELETE FROM student_awards WHERE student_id = ?', [studentId]);
       const awardValues = awards
@@ -534,7 +518,6 @@ router.put('/students/:studentId', async (req, res) => {
       }
     }
 
-    // Update work experience
     if (workExperience && Array.isArray(workExperience)) {
       await connection.query('DELETE FROM student_work_experience WHERE student_id = ?', [studentId]);
       const workValues = workExperience
@@ -700,16 +683,6 @@ router.delete('/students/:studentId/manual-form', async (req, res) => {
 });
 
 // ============ DOCUMENT MANAGEMENT ============
-
-const PREDEFINED_DOCUMENTS = [
-  { name: 'Passport', order: 1 },
-  { name: 'CNIC (Back & Front)', order: 2 },
-  { name: 'Updated CV / Resume', order: 3 },
-  { name: 'English Proficiency Test', order: 4 },
-  { name: 'Extracurricular Certificates', order: 5 },
-  { name: 'Essay or SOP', order: 6 },
-  { name: 'Birth Certificate', order: 7 },
-];
 
 router.post('/students/:studentId/documents', upload.single('document'), async (req, res) => {
   const connection = await pool.getConnection();
@@ -954,17 +927,24 @@ router.post('/students/:studentId/meetings', async (req, res) => {
 });
 
 // ============ CREATE APPLICATIONS FOR STUDENT ============
+// Now accepts universityIds — creates one application per university,
+// deriving country from the university's country_id.
+// Falls back to countryIds for backward compatibility if universityIds not provided.
 
 router.post('/students/:studentId/create-applications', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
     const { studentId } = req.params;
-    const { countryIds } = req.body;
+    const { universityIds, countryIds } = req.body;
 
-    if (!countryIds || !Array.isArray(countryIds) || countryIds.length === 0) {
+    // Determine mode: university-based (new) or country-based (legacy)
+    const useUniversityMode = Array.isArray(universityIds) && universityIds.length > 0;
+    const useLegacyMode     = !useUniversityMode && Array.isArray(countryIds) && countryIds.length > 0;
+
+    if (!useUniversityMode && !useLegacyMode) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Please provide at least one country ID' });
+      return res.status(400).json({ success: false, message: 'Please provide at least one university ID' });
     }
 
     const [student] = await connection.query(
@@ -975,45 +955,84 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Student not found' });
     }
 
-    const [existingApps] = await connection.query(
-      'SELECT country_id FROM applications WHERE student_id = ? AND country_id IN (?)',
-      [studentId, countryIds]
-    );
-    if (existingApps.length > 0) {
-      const existingCountryIds = existingApps.map(app => app.country_id);
-      await connection.rollback();
-      return res.status(409).json({
-        success: false,
-        message: 'Applications already exist for some selected countries',
-        existingCountryIds
-      });
-    }
-
     let createdCount = 0;
     const currentDate = new Date().toISOString().split('T')[0];
     const currentYear = new Date().getFullYear();
 
-    for (const countryId of countryIds) {
-      const [country] = await connection.query(
-        'SELECT id, country_name FROM countries WHERE id = ? AND status = ?', [countryId, 'Active']
-      );
-      if (country.length === 0) continue;
-
+    const generateApplicationId = async () => {
       const [result] = await connection.query(
         `SELECT MAX(CAST(SUBSTRING(application_id, 8) AS UNSIGNED)) as max_id 
          FROM applications WHERE application_id LIKE ?`,
         [`APP${currentYear}%`]
       );
       const nextId = (result[0].max_id || 0) + 1;
-      const applicationId = `APP${currentYear}${String(nextId).padStart(3, '0')}`;
+      return `APP${currentYear}${String(nextId).padStart(3, '0')}`;
+    };
 
-      await connection.query(
-        `INSERT INTO applications 
-         (application_id, application_date, student_id, student_name, country_id, application_status, tagging_status)
-         VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
-        [applicationId, currentDate, studentId, student[0].name, countryId]
+    if (useUniversityMode) {
+      // University-based: create one application per university
+      for (const universityId of universityIds) {
+        // Fetch university + country info
+        const [uniRows] = await connection.query(
+          `SELECT u.id, u.university_name, u.country_id, c.country_name, c.status as country_status
+           FROM universities u
+           INNER JOIN countries c ON u.country_id = c.id
+           WHERE u.id = ?`,
+          [universityId]
+        );
+        if (uniRows.length === 0) continue;
+
+        const uni = uniRows[0];
+
+        // Check if application already exists for this student + university
+        const [existingApp] = await connection.query(
+          'SELECT id FROM applications WHERE student_id = ? AND university_id = ?',
+          [studentId, universityId]
+        );
+        if (existingApp.length > 0) continue; // skip duplicates silently
+
+        const applicationId = await generateApplicationId();
+
+        await connection.query(
+          `INSERT INTO applications 
+           (application_id, application_date, student_id, student_name, country_id, university_id, application_status, tagging_status)
+           VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
+          [applicationId, currentDate, studentId, student[0].name, uni.country_id, universityId]
+        );
+        createdCount++;
+      }
+    } else {
+      // Legacy country-based mode
+      const [existingApps] = await connection.query(
+        'SELECT country_id FROM applications WHERE student_id = ? AND country_id IN (?)',
+        [studentId, countryIds]
       );
-      createdCount++;
+      if (existingApps.length > 0) {
+        const existingCountryIds = existingApps.map(app => app.country_id);
+        await connection.rollback();
+        return res.status(409).json({
+          success: false,
+          message: 'Applications already exist for some selected countries',
+          existingCountryIds
+        });
+      }
+
+      for (const countryId of countryIds) {
+        const [country] = await connection.query(
+          'SELECT id, country_name FROM countries WHERE id = ? AND status = ?', [countryId, 'Active']
+        );
+        if (country.length === 0) continue;
+
+        const applicationId = await generateApplicationId();
+
+        await connection.query(
+          `INSERT INTO applications 
+           (application_id, application_date, student_id, student_name, country_id, application_status, tagging_status)
+           VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
+          [applicationId, currentDate, studentId, student[0].name, countryId]
+        );
+        createdCount++;
+      }
     }
 
     await connection.commit();
