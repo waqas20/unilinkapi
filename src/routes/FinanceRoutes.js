@@ -711,9 +711,9 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         due_date=?,
         university_name=COALESCE(?,university_name),
         commission_reference=COALESCE(?,commission_reference),
-        agent_id=?,
-        agent_commission_percent=?,
-        agent_commission_amount=?,
+        agent_id=COALESCE(?,agent_id),
+        agent_commission_percent=COALESCE(?,agent_commission_percent),
+        agent_commission_amount=COALESCE(?,agent_commission_amount),
         notes=?
        WHERE id=?`,
       [
