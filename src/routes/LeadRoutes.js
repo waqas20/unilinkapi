@@ -411,9 +411,15 @@ router.get('/leads/:leadId/history', async (req, res) => {
     const { leadId } = req.params;
     const [lead] = await pool.query('SELECT * FROM leads WHERE id = ?', [leadId]);
     if (lead.length === 0) return res.status(404).json({ success: false, message: 'Lead not found' });
-    const [followUps] = await pool.query('SELECT * FROM follow_ups WHERE lead_id = ? ORDER BY followed_up_at DESC', [leadId]);
+    const [followUps] = await pool.query(
+      `SELECT fu.*, l.purpose_of_visit
+       FROM follow_ups fu
+       LEFT JOIN leads l ON fu.lead_id = l.id
+       WHERE fu.lead_id = ? ORDER BY fu.followed_up_at DESC`,
+      [leadId]
+    );
     const [changes] = await pool.query(
-      `SELECT lc.*, fu.follow_up_number, fu.followed_up_at, fu.purpose_of_visit
+      `SELECT lc.*, fu.follow_up_number, fu.followed_up_at
        FROM lead_changes lc
        LEFT JOIN follow_ups fu ON lc.follow_up_id = fu.id
        WHERE lc.lead_id = ? ORDER BY lc.changed_at DESC`,
