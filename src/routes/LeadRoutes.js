@@ -60,6 +60,20 @@ const generatePassword = (length = 12) => {
   return password;
 };
 
+// ─── DB Migration Note ────────────────────────────────────────────────────────
+// Run the following ALTER statements once against your MySQL database if you
+// haven't already added these columns:
+//
+//   ALTER TABLE leads
+//     ADD COLUMN IF NOT EXISTS program      VARCHAR(100)  NULL,
+//     ADD COLUMN IF NOT EXISTS grades       TEXT          NULL,
+//     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT      NULL;
+//
+// The `course` column is no longer used by the app but can be left in place
+// or dropped at your convenience:
+//   ALTER TABLE leads DROP COLUMN course;
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Create new lead (First Time Query)
 router.post('/leads', async (req, res) => {
   const connection = await pool.getConnection();
@@ -67,7 +81,11 @@ router.post('/leads', async (req, res) => {
   try {
     await connection.beginTransaction();
     
-    const { fullName, email, phone, address, interest, comments, countriesOfInterest, course, qualification } = req.body;
+    const {
+      fullName, email, phone, address,
+      interest, program, comments,
+      countriesOfInterest, grades, qualification
+    } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
       await connection.rollback();
@@ -117,9 +135,15 @@ router.post('/leads', async (req, res) => {
       : null;
     
     const [result] = await connection.query(
-      `INSERT INTO leads (full_name, email, phone, address, interest, comments, countries_of_interest, course, qualification, is_follow_up, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
-      [trimmedName, trimmedEmail, trimmedPhone, address.trim(), interest, comments?.trim() || null, countriesJson, course?.trim() || null, qualification?.trim() || null]
+      `INSERT INTO leads
+         (full_name, email, phone, address, interest, program, comments,
+          countries_of_interest, grades, qualification, is_follow_up, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
+      [
+        trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+        interest.trim(), program?.trim() || null, comments?.trim() || null,
+        countriesJson, grades?.trim() || null, qualification?.trim() || null
+      ]
     );
     
     await connection.commit();
@@ -140,41 +164,84 @@ router.post('/leads', async (req, res) => {
 });
 
 // Lookup lead for follow-up
+// Accepts: lookupName (required) + one or both of lookupEmail / lookupPhone
 router.post('/leads/lookup', async (req, res) => {
   try {
-    const { lookupName, lookupEmail } = req.body;
+    const { lookupName, lookupEmail, lookupPhone, purposeOfVisit } = req.body;
     
-    if (!lookupName || !lookupEmail) {
-      return res.status(400).json({ success: false, message: 'Both name and email are required to lookup your information' });
+    if (!lookupName) {
+      return res.status(400).json({ success: false, message: 'Full name is required to lookup your information' });
     }
 
-    const trimmedEmail = lookupEmail.trim().toLowerCase();
+    const hasEmail = lookupEmail && lookupEmail.trim().length > 0;
+    const hasPhone = lookupPhone && lookupPhone.trim().length > 0;
+
+    if (!hasEmail && !hasPhone) {
+      return res.status(400).json({ success: false, message: 'Please provide either an email address or phone number' });
+    }
+
     const trimmedName = lookupName.trim();
 
-    if (!validateEmail(trimmedEmail)) {
+    if (hasEmail && !validateEmail(lookupEmail.trim())) {
       return res.status(400).json({ success: false, message: 'Please provide a valid email address' });
+    }
+
+    if (hasPhone && !validatePhone(lookupPhone.trim())) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid phone number (minimum 10 digits)' });
+    }
+
+    if (!purposeOfVisit || !purposeOfVisit.trim()) {
+      return res.status(400).json({ success: false, message: 'Purpose of visit is required' });
+    }
+
+    // Build dynamic WHERE clause: name is always required; match email OR phone
+    let whereClause = 'LOWER(TRIM(full_name)) = LOWER(?)';
+    const queryParams = [trimmedName];
+
+    if (hasEmail && hasPhone) {
+      whereClause += ' AND (LOWER(TRIM(email)) = LOWER(?) OR REPLACE(REPLACE(REPLACE(phone, " ", ""), "-", ""), "+", "") LIKE ?)';
+      const normalizedPhone = '%' + lookupPhone.trim().replace(/\D/g, '');
+      queryParams.push(lookupEmail.trim().toLowerCase(), normalizedPhone);
+    } else if (hasEmail) {
+      whereClause += ' AND LOWER(TRIM(email)) = LOWER(?)';
+      queryParams.push(lookupEmail.trim().toLowerCase());
+    } else {
+      // phone only — strip non-digits and do a suffix match to handle country code variants
+      whereClause += ' AND REPLACE(REPLACE(REPLACE(phone, " ", ""), "-", ""), "+", "") LIKE ?';
+      const normalizedPhone = '%' + lookupPhone.trim().replace(/\D/g, '');
+      queryParams.push(normalizedPhone);
     }
     
     const [leads] = await pool.query(
-      `SELECT id, full_name, email, phone, address, interest, comments,
-              countries_of_interest, course, qualification,
+      `SELECT id, full_name, email, phone, address, interest, program, comments,
+              countries_of_interest, grades, qualification,
               (SELECT COUNT(*) FROM follow_ups WHERE lead_id = leads.id) as follow_up_count,
               created_at, updated_at
        FROM leads 
-       WHERE LOWER(TRIM(full_name)) = LOWER(?) AND LOWER(TRIM(email)) = LOWER(?)
+       WHERE ${whereClause}
        ORDER BY created_at DESC
        LIMIT 1`,
-      [trimmedName, trimmedEmail]
+      queryParams
     );
     
     if (leads.length === 0) {
       return res.status(404).json({ 
         success: false, 
-        message: 'No record found with the provided name and email. Please check your information or submit a new registration.' 
+        message: 'No record found with the provided details. Please check your information or submit a new registration.' 
       });
     }
+
+    // Save the purpose of visit against this lead record
+    await pool.query(
+      'UPDATE leads SET purpose_of_visit = ? WHERE id = ?',
+      [purposeOfVisit.trim(), leads[0].id]
+    );
     
-    res.json({ success: true, message: 'Your information has been retrieved successfully', lead: leads[0] });
+    res.json({
+      success: true,
+      message: 'Your information has been retrieved successfully',
+      lead: leads[0]
+    });
     
   } catch (error) {
     console.error('Error looking up lead:', error);
@@ -190,7 +257,12 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     await connection.beginTransaction();
     
     const { leadId } = req.params;
-    const { fullName, email, phone, address, interest, comments, countriesOfInterest, course, qualification } = req.body;
+    const {
+      fullName, email, phone, address,
+      interest, program, comments,
+      countriesOfInterest, grades, qualification,
+      purposeOfVisit
+    } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
       await connection.rollback();
@@ -267,9 +339,10 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       phone: 'phone',
       address: 'address',
       interest: 'interest',
+      program: 'program',
       comments: 'comments',
       countriesOfInterest: 'countries_of_interest',
-      course: 'course',
+      grades: 'grades',
       qualification: 'qualification'
     };
 
@@ -278,10 +351,11 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       email: trimmedEmail,
       phone: trimmedPhone,
       address: address.trim(),
-      interest: interest,
+      interest: interest.trim(),
+      program: program?.trim() || null,
       comments: comments?.trim() || null,
       countriesOfInterest: countriesJson,
-      course: course?.trim() || null,
+      grades: grades?.trim() || null,
       qualification: qualification?.trim() || null
     };
     
@@ -304,10 +378,18 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     
     await connection.query(
       `UPDATE leads 
-       SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, comments = ?,
-           countries_of_interest = ?, course = ?, qualification = ?, is_follow_up = TRUE
+       SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
+           comments = ?, countries_of_interest = ?, grades = ?, qualification = ?,
+           purpose_of_visit = ?, is_follow_up = TRUE
        WHERE id = ?`,
-      [trimmedName, trimmedEmail, trimmedPhone, address.trim(), interest, comments?.trim() || null, countriesJson, course?.trim() || null, qualification?.trim() || null, leadId]
+      [
+        trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+        interest.trim(), program?.trim() || null,
+        comments?.trim() || null, countriesJson,
+        grades?.trim() || null, qualification?.trim() || null,
+        purposeOfVisit?.trim() || oldData.purpose_of_visit || null,
+        leadId
+      ]
     );
     
     await connection.commit();
@@ -406,7 +488,11 @@ router.put('/leads/:leadId', async (req, res) => {
     await connection.beginTransaction();
     
     const { leadId } = req.params;
-    const { fullName, email, phone, address, interest, comments, status, countriesOfInterest, course, qualification } = req.body;
+    const {
+      fullName, email, phone, address,
+      interest, program, comments,
+      status, countriesOfInterest, grades, qualification
+    } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
       await connection.rollback();
@@ -445,10 +531,16 @@ router.put('/leads/:leadId', async (req, res) => {
     
     await connection.query(
       `UPDATE leads 
-       SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, comments = ?, status = ?,
-           countries_of_interest = ?, course = ?, qualification = ?
+       SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
+           comments = ?, status = ?, countries_of_interest = ?, grades = ?, qualification = ?
        WHERE id = ?`,
-      [trimmedName, trimmedEmail, trimmedPhone, address.trim(), interest, comments?.trim() || null, status || 'New', countriesJson, course?.trim() || null, qualification?.trim() || null, leadId]
+      [
+        trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+        interest.trim(), program?.trim() || null,
+        comments?.trim() || null, status || 'New',
+        countriesJson, grades?.trim() || null, qualification?.trim() || null,
+        leadId
+      ]
     );
     
     await connection.commit();
