@@ -18,6 +18,40 @@ const generateInvoiceId = async (connection) => {
 };
 
 // ============================================================
+// MIGRATION HELPER — run once to add new columns if missing
+// Call GET /finance/migrate to apply safely
+// ============================================================
+router.get('/finance/migrate', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    // Add payment_method to invoices if not present
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS payment_method ENUM('bank','cash') NOT NULL DEFAULT 'bank'
+    `).catch(() => {});
+
+    // Create invoice_selected_default_services table if not present
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS invoice_selected_default_services (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id  INT NOT NULL,
+        service_id  INT,
+        service_name VARCHAR(255) NOT NULL,
+        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+      )
+    `).catch(() => {});
+
+    res.json({ success: true, message: 'Migration applied successfully' });
+  } catch (error) {
+    console.error('Migration error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ============================================================
 // BANK ACCOUNTS
 // ============================================================
 
@@ -52,9 +86,7 @@ router.get('/finance/bank-accounts/:accountId', async (req, res) => {
   try {
     const { accountId } = req.params;
     const [accounts] = await pool.query('SELECT * FROM bank_accounts WHERE id = ?', [accountId]);
-    if (accounts.length === 0) {
-      return res.status(404).json({ success: false, message: 'Bank account not found' });
-    }
+    if (accounts.length === 0) return res.status(404).json({ success: false, message: 'Bank account not found' });
     res.json({ success: true, account: accounts[0] });
   } catch (error) {
     console.error('Error fetching bank account:', error);
@@ -67,20 +99,14 @@ router.post('/finance/bank-accounts', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { accountName, bankName, accountNumber, iban, branchName, branchCode, currency, status } = req.body;
-
     if (!accountName || !bankName || !accountNumber) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Account name, bank name, and account number are required' });
     }
-
     const [result] = await connection.query(
       `INSERT INTO bank_accounts (account_name, bank_name, account_number, iban, branch_name, branch_code, currency, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        accountName.trim(), bankName.trim(), accountNumber.trim(),
-        iban?.trim() || null, branchName?.trim() || null, branchCode?.trim() || null,
-        currency || 'PKR', status || 'Active'
-      ]
+      [accountName.trim(), bankName.trim(), accountNumber.trim(), iban?.trim() || null, branchName?.trim() || null, branchCode?.trim() || null, currency || 'PKR', status || 'Active']
     );
     await connection.commit();
     res.status(201).json({ success: true, message: 'Bank account created successfully', accountId: result.insertId });
@@ -99,26 +125,19 @@ router.put('/finance/bank-accounts/:accountId', async (req, res) => {
     await connection.beginTransaction();
     const { accountId } = req.params;
     const { accountName, bankName, accountNumber, iban, branchName, branchCode, currency, status } = req.body;
-
     if (!accountName || !bankName || !accountNumber) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Account name, bank name, and account number are required' });
     }
-
     const [existing] = await connection.query('SELECT id FROM bank_accounts WHERE id = ?', [accountId]);
     if (existing.length === 0) {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Bank account not found' });
     }
-
     await connection.query(
       `UPDATE bank_accounts SET account_name=?, bank_name=?, account_number=?, iban=?,
        branch_name=?, branch_code=?, currency=?, status=? WHERE id=?`,
-      [
-        accountName.trim(), bankName.trim(), accountNumber.trim(),
-        iban?.trim() || null, branchName?.trim() || null, branchCode?.trim() || null,
-        currency || 'PKR', status || 'Active', accountId
-      ]
+      [accountName.trim(), bankName.trim(), accountNumber.trim(), iban?.trim() || null, branchName?.trim() || null, branchCode?.trim() || null, currency || 'PKR', status || 'Active', accountId]
     );
     await connection.commit();
     res.json({ success: true, message: 'Bank account updated successfully' });
@@ -136,13 +155,11 @@ router.delete('/finance/bank-accounts/:accountId', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { accountId } = req.params;
-
     const [existing] = await connection.query('SELECT id FROM bank_accounts WHERE id = ?', [accountId]);
     if (existing.length === 0) {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Bank account not found' });
     }
-
     await connection.query('DELETE FROM bank_accounts WHERE id = ?', [accountId]);
     await connection.commit();
     res.json({ success: true, message: 'Bank account deleted successfully' });
@@ -159,7 +176,7 @@ router.delete('/finance/bank-accounts/:accountId', async (req, res) => {
 });
 
 // ============================================================
-// DEFAULT SERVICES
+// DEFAULT SERVICES (global list — managed from Finance page)
 // ============================================================
 
 router.get('/finance/default-services', async (req, res) => {
@@ -279,12 +296,8 @@ router.post('/finance/agents', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Agent name is required' });
     }
     const [result] = await connection.query(
-      `INSERT INTO agents (agent_name, company_name, email, phone, address, status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        agentName.trim(), companyName?.trim() || null, email?.trim() || null,
-        phone?.trim() || null, address?.trim() || null, status || 'Active', notes?.trim() || null
-      ]
+      `INSERT INTO agents (agent_name, company_name, email, phone, address, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [agentName.trim(), companyName?.trim() || null, email?.trim() || null, phone?.trim() || null, address?.trim() || null, status || 'Active', notes?.trim() || null]
     );
     await connection.commit();
     res.status(201).json({ success: true, message: 'Agent created', agentId: result.insertId });
@@ -314,10 +327,7 @@ router.put('/finance/agents/:agentId', async (req, res) => {
     }
     await connection.query(
       `UPDATE agents SET agent_name=?, company_name=?, email=?, phone=?, address=?, status=?, notes=? WHERE id=?`,
-      [
-        agentName.trim(), companyName?.trim() || null, email?.trim() || null,
-        phone?.trim() || null, address?.trim() || null, status || 'Active', notes?.trim() || null, agentId
-      ]
+      [agentName.trim(), companyName?.trim() || null, email?.trim() || null, phone?.trim() || null, address?.trim() || null, status || 'Active', notes?.trim() || null, agentId]
     );
     await connection.commit();
     res.json({ success: true, message: 'Agent updated' });
@@ -356,7 +366,7 @@ router.delete('/finance/agents/:agentId', async (req, res) => {
 });
 
 // ============================================================
-// FINANCE STATISTICS  (all in PKR — currency columns not involved)
+// FINANCE STATISTICS
 // ============================================================
 router.get('/finance/statistics', async (req, res) => {
   try {
@@ -407,15 +417,14 @@ router.get('/finance/statistics', async (req, res) => {
 router.get('/finance/invoices', async (req, res) => {
   try {
     const { type, status, month, year, bankAccountId } = req.query;
-
     let whereClause = 'WHERE 1=1';
     const params = [];
 
-    if (type)          { whereClause += ' AND i.invoice_type = ?';      params.push(type); }
-    if (status)        { whereClause += ' AND i.payment_status = ?';     params.push(status); }
+    if (type)          { whereClause += ' AND i.invoice_type = ?';       params.push(type); }
+    if (status)        { whereClause += ' AND i.payment_status = ?';      params.push(status); }
     if (month)         { whereClause += ' AND MONTH(i.invoice_date) = ?'; params.push(month); }
     if (year)          { whereClause += ' AND YEAR(i.invoice_date) = ?';  params.push(year); }
-    if (bankAccountId) { whereClause += ' AND i.bank_account_id = ?';    params.push(bankAccountId); }
+    if (bankAccountId) { whereClause += ' AND i.bank_account_id = ?';     params.push(bankAccountId); }
 
     const [invoices] = await pool.query(
       `SELECT i.*,
@@ -430,15 +439,10 @@ router.get('/finance/invoices', async (req, res) => {
     );
 
     for (const inv of invoices) {
-      const [extras] = await pool.query(
-        'SELECT * FROM invoice_extra_services WHERE invoice_id = ?', [inv.id]
-      );
+      const [extras] = await pool.query('SELECT * FROM invoice_extra_services WHERE invoice_id = ?', [inv.id]);
       inv.extra_services = extras;
-
       if (inv.invoice_type === 'Agent Commission') {
-        const [agentStudents] = await pool.query(
-          'SELECT * FROM invoice_agent_students WHERE invoice_id = ?', [inv.id]
-        );
+        const [agentStudents] = await pool.query('SELECT * FROM invoice_agent_students WHERE invoice_id = ?', [inv.id]);
         inv.agent_students = agentStudents;
       }
     }
@@ -464,30 +468,33 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
       [invoiceId]
     );
 
-    if (invoices.length === 0) {
-      return res.status(404).json({ success: false, message: 'Invoice not found' });
-    }
+    if (invoices.length === 0) return res.status(404).json({ success: false, message: 'Invoice not found' });
 
     const [extraServices]   = await pool.query('SELECT * FROM invoice_extra_services   WHERE invoice_id = ?', [invoiceId]);
     const [countryServices] = await pool.query('SELECT * FROM invoice_country_services WHERE invoice_id = ?', [invoiceId]);
     const [agentStudents]   = await pool.query('SELECT * FROM invoice_agent_students   WHERE invoice_id = ?', [invoiceId]);
 
+    // Fetch the per-invoice selected default services (not the global list)
     let defaultServices = [];
     if (invoices[0].invoice_type === 'Student') {
-      const [ds] = await pool.query(
-        'SELECT * FROM invoice_default_services WHERE is_active = 1 ORDER BY display_order ASC'
-      );
-      defaultServices = ds;
+      // Try per-invoice table first; fall back to global list for old invoices
+      let [perInvoice] = await pool.query(
+        'SELECT * FROM invoice_selected_default_services WHERE invoice_id = ? ORDER BY id ASC',
+        [invoiceId]
+      ).catch(() => [[]]);
+
+      if (perInvoice.length > 0) {
+        defaultServices = perInvoice;
+      } else {
+        // Backward compat: old invoices show all active default services
+        const [ds] = await pool.query(
+          'SELECT * FROM invoice_default_services WHERE is_active = 1 ORDER BY display_order ASC'
+        );
+        defaultServices = ds;
+      }
     }
 
-    res.json({
-      success: true,
-      invoice: invoices[0],
-      extraServices,
-      countryServices,
-      agentStudents,
-      defaultServices
-    });
+    res.json({ success: true, invoice: invoices[0], extraServices, countryServices, agentStudents, defaultServices });
   } catch (error) {
     console.error('Error fetching invoice:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch invoice' });
@@ -500,28 +507,37 @@ router.post('/finance/invoices', async (req, res) => {
     await connection.beginTransaction();
 
     const {
-      invoiceType, invoiceDate, dueDate, bankAccountId,
+      invoiceType, invoiceDate, dueDate,
+      // payment method
+      paymentMethod, bankAccountId,
       studentId, visaId,
       universityName, commissionReference,
       agentId, agentCommissionPercent, agentStudents,
       baseAmount, discount, extraServices, selectedCountryServices,
+      selectedDefaultServices,         // new: array of { id, service_name }
       finalAmount, gstPercent, gstAmount,
       notes,
-      // Currency fields
       selectedCurrency, exchangeRate, convertedAmount
     } = req.body;
 
-    if (!invoiceType || !invoiceDate || !bankAccountId) {
+    if (!invoiceType || !invoiceDate) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Invoice type, date, and bank account are required' });
+      return res.status(400).json({ success: false, message: 'Invoice type and date are required' });
     }
 
-    const [bank] = await connection.query(
-      'SELECT id FROM bank_accounts WHERE id = ? AND status = ?', [bankAccountId, 'Active']
-    );
-    if (bank.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Bank account not found or inactive' });
+    const resolvedPaymentMethod = paymentMethod === 'cash' ? 'cash' : 'bank';
+
+    // Validate bank account only when payment method is bank
+    if (resolvedPaymentMethod === 'bank') {
+      if (!bankAccountId) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: 'Bank account is required for bank transfers' });
+      }
+      const [bank] = await connection.query('SELECT id FROM bank_accounts WHERE id = ? AND status = ?', [bankAccountId, 'Active']);
+      if (bank.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: 'Bank account not found or inactive' });
+      }
     }
 
     let studentName = null, studentRefId = null, studentEmail = null, studentMobile = null, studentCountry = null;
@@ -542,39 +558,30 @@ router.post('/finance/invoices', async (req, res) => {
 
     let visaRefId = null, visaType = null, visaCountry = null;
     if (visaId) {
-      const [visas] = await connection.query(
-        'SELECT visa_id, visa_type FROM visas WHERE id = ?', [visaId]
-      );
-      if (visas.length > 0) {
-        visaRefId = visas[0].visa_id;
-        visaType  = visas[0].visa_type;
-      }
+      const [visas] = await connection.query('SELECT visa_id, visa_type FROM visas WHERE id = ?', [visaId]);
+      if (visas.length > 0) { visaRefId = visas[0].visa_id; visaType = visas[0].visa_type; }
       if (studentCountry) visaCountry = studentCountry;
     }
 
     const extrasTotal       = Array.isArray(extraServices)
-      ? extraServices.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0)
-      : 0;
-
+      ? extraServices.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0) : 0;
     const commissionPercent = parseFloat(agentCommissionPercent) || 0;
     const totalBase         = parseFloat(baseAmount) || 0;
     const commissionAmount  = invoiceType === 'Agent Commission'
-      ? (totalBase * commissionPercent / 100)
-      : null;
+      ? (totalBase * commissionPercent / 100) : null;
 
-    const resolvedGstPercent = parseFloat(gstPercent) || 0;
-    const resolvedGstAmount  = parseFloat(gstAmount)  || 0;
-
-    // Currency
-    const resolvedCurrency       = selectedCurrency   || 'PKR';
-    const resolvedExchangeRate   = resolvedCurrency === 'PKR' ? 1 : (parseFloat(exchangeRate) || 1);
+    const resolvedGstPercent      = parseFloat(gstPercent) || 0;
+    const resolvedGstAmount       = parseFloat(gstAmount)  || 0;
+    const resolvedCurrency        = selectedCurrency || 'PKR';
+    const resolvedExchangeRate    = resolvedCurrency === 'PKR' ? 1 : (parseFloat(exchangeRate) || 1);
     const resolvedConvertedAmount = resolvedCurrency === 'PKR' ? null : (parseFloat(convertedAmount) || null);
 
     const invoiceId = await generateInvoiceId(connection);
 
     const [result] = await connection.query(
       `INSERT INTO invoices
-       (invoice_id, invoice_type, invoice_date, due_date, bank_account_id,
+       (invoice_id, invoice_type, invoice_date, due_date,
+        payment_method, bank_account_id,
         student_id, student_name, student_ref_id, student_email, student_mobile, student_country,
         visa_id, visa_ref_id, visa_type, visa_country,
         university_name, commission_reference,
@@ -583,33 +590,28 @@ router.post('/finance/invoices', async (req, res) => {
         gst_percent, gst_amount,
         selected_currency, exchange_rate, converted_amount,
         payment_status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
       [
-        invoiceId, invoiceType, invoiceDate, dueDate || null, bankAccountId,
+        invoiceId, invoiceType, invoiceDate, dueDate || null,
+        resolvedPaymentMethod, resolvedPaymentMethod === 'bank' ? (bankAccountId || null) : null,
         studentId || null, studentName, studentRefId, studentEmail, studentMobile, studentCountry,
         visaId || null, visaRefId, visaType, visaCountry,
         universityName || null, commissionReference || null,
-        agentId || null,
-        commissionPercent || null,
+        agentId || null, commissionPercent || null,
         invoiceType === 'Agent Commission' ? commissionAmount : null,
-        totalBase,
-        parseFloat(discount) || 0,
-        extrasTotal,
-        parseFloat(finalAmount) || 0,
-        resolvedGstPercent,
-        resolvedGstAmount,
-        resolvedCurrency,
-        resolvedExchangeRate,
-        resolvedConvertedAmount,
+        totalBase, parseFloat(discount) || 0, extrasTotal, parseFloat(finalAmount) || 0,
+        resolvedGstPercent, resolvedGstAmount,
+        resolvedCurrency, resolvedExchangeRate, resolvedConvertedAmount,
         notes || null
       ]
     );
 
     const newInvoiceId = result.insertId;
 
+    // Extra services
     if (Array.isArray(extraServices) && extraServices.length > 0) {
       for (const svc of extraServices) {
-        if (svc.name && svc.price !== undefined) {
+        if (svc.name) {
           await connection.query(
             'INSERT INTO invoice_extra_services (invoice_id, service_name, price) VALUES (?, ?, ?)',
             [newInvoiceId, svc.name, parseFloat(svc.price) || 0]
@@ -618,6 +620,7 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
+    // Country services
     if (Array.isArray(selectedCountryServices) && selectedCountryServices.length > 0) {
       for (const cs of selectedCountryServices) {
         await connection.query(
@@ -627,6 +630,20 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
+    // Per-invoice selected default services (Student only)
+    if (invoiceType === 'Student' && Array.isArray(selectedDefaultServices) && selectedDefaultServices.length > 0) {
+      for (const ds of selectedDefaultServices) {
+        await connection.query(
+          'INSERT INTO invoice_selected_default_services (invoice_id, service_id, service_name) VALUES (?, ?, ?)',
+          [newInvoiceId, ds.id || null, ds.service_name]
+        ).catch(async () => {
+          // If table doesn't exist yet, silently skip (tell user to run migration)
+          console.warn('invoice_selected_default_services table missing — run GET /finance/migrate');
+        });
+      }
+    }
+
+    // Agent students
     if (invoiceType === 'Agent Commission' && Array.isArray(agentStudents) && agentStudents.length > 0) {
       for (const s of agentStudents) {
         await connection.query(
@@ -638,10 +655,8 @@ router.post('/finance/invoices', async (req, res) => {
 
     await connection.commit();
     res.status(201).json({
-      success: true,
-      message: 'Invoice created successfully',
-      invoiceId: newInvoiceId,
-      generatedInvoiceId: invoiceId
+      success: true, message: 'Invoice created successfully',
+      invoiceId: newInvoiceId, generatedInvoiceId: invoiceId
     });
   } catch (error) {
     await connection.rollback();
@@ -652,7 +667,7 @@ router.post('/finance/invoices', async (req, res) => {
   }
 });
 
-// PUT update invoice
+// PUT — update invoice
 router.put('/finance/invoices/:invoiceId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -664,7 +679,6 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       invoiceDate, dueDate, universityName, commissionReference,
       agentId, agentCommissionPercent, agentCommissionAmount,
       notes
-      // NOTE: currency fields are not editable after creation
     } = req.body;
 
     const [existing] = await connection.query('SELECT id FROM invoices WHERE id = ?', [invoiceId]);
@@ -673,10 +687,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
-    const safeFloat = (v) => {
-      const n = parseFloat(v);
-      return isFinite(n) ? n : null;
-    };
+    const safeFloat = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
 
     await connection.query(
       `UPDATE invoices SET
@@ -734,13 +745,11 @@ router.delete('/finance/invoices/:invoiceId', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { invoiceId } = req.params;
-
     const [existing] = await connection.query('SELECT id FROM invoices WHERE id = ?', [invoiceId]);
     if (existing.length === 0) {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-
     await connection.query('DELETE FROM invoices WHERE id = ?', [invoiceId]);
     await connection.commit();
     res.json({ success: true, message: 'Invoice deleted successfully' });
@@ -761,8 +770,7 @@ router.get('/countries/:countryId/services', async (req, res) => {
   try {
     const { countryId } = req.params;
     const [services] = await pool.query(
-      'SELECT * FROM country_services WHERE country_id = ? ORDER BY display_order ASC, id ASC',
-      [countryId]
+      'SELECT * FROM country_services WHERE country_id = ? ORDER BY display_order ASC, id ASC', [countryId]
     );
     res.json({ success: true, services, total: services.length });
   } catch (error) {
@@ -777,15 +785,9 @@ router.post('/countries/:countryId/services', async (req, res) => {
     await connection.beginTransaction();
     const { countryId } = req.params;
     const { serviceName, description, displayOrder } = req.body;
-    if (!serviceName) {
-      await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Service name is required' });
-    }
+    if (!serviceName) { await connection.rollback(); return res.status(400).json({ success: false, message: 'Service name is required' }); }
     const [country] = await connection.query('SELECT id FROM countries WHERE id = ?', [countryId]);
-    if (country.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Country not found' });
-    }
+    if (country.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Country not found' }); }
     const [result] = await connection.query(
       'INSERT INTO country_services (country_id, service_name, description, display_order) VALUES (?, ?, ?, ?)',
       [countryId, serviceName.trim(), description?.trim() || null, displayOrder || 99]
@@ -807,17 +809,9 @@ router.put('/countries/:countryId/services/:serviceId', async (req, res) => {
     await connection.beginTransaction();
     const { countryId, serviceId } = req.params;
     const { serviceName, description, displayOrder } = req.body;
-    if (!serviceName) {
-      await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Service name is required' });
-    }
-    const [existing] = await connection.query(
-      'SELECT id FROM country_services WHERE id = ? AND country_id = ?', [serviceId, countryId]
-    );
-    if (existing.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Service not found' });
-    }
+    if (!serviceName) { await connection.rollback(); return res.status(400).json({ success: false, message: 'Service name is required' }); }
+    const [existing] = await connection.query('SELECT id FROM country_services WHERE id = ? AND country_id = ?', [serviceId, countryId]);
+    if (existing.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Service not found' }); }
     await connection.query(
       'UPDATE country_services SET service_name=?, description=?, display_order=? WHERE id=?',
       [serviceName.trim(), description?.trim() || null, displayOrder || 99, serviceId]
@@ -838,13 +832,8 @@ router.delete('/countries/:countryId/services/:serviceId', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { countryId, serviceId } = req.params;
-    const [existing] = await connection.query(
-      'SELECT id FROM country_services WHERE id = ? AND country_id = ?', [serviceId, countryId]
-    );
-    if (existing.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Service not found' });
-    }
+    const [existing] = await connection.query('SELECT id FROM country_services WHERE id = ? AND country_id = ?', [serviceId, countryId]);
+    if (existing.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Service not found' }); }
     await connection.query('DELETE FROM country_services WHERE id = ?', [serviceId]);
     await connection.commit();
     res.json({ success: true, message: 'Service deleted successfully' });
@@ -863,9 +852,7 @@ router.get('/finance/student-visas/:studentId', async (req, res) => {
     const { studentId } = req.params;
     const [visas] = await pool.query(
       `SELECT v.id, v.visa_id, v.visa_type, v.visa_status, v.institute
-       FROM visas v
-       WHERE v.student_id = ?
-       ORDER BY v.created_at DESC`,
+       FROM visas v WHERE v.student_id = ? ORDER BY v.created_at DESC`,
       [studentId]
     );
     res.json({ success: true, visas });
