@@ -432,13 +432,14 @@ router.get('/leads/:leadId/history', async (req, res) => {
   }
 });
 
-// Get all leads that have follow-ups
+// Get all leads that have follow-ups — excludes registered students
 router.get('/leads/followups', async (req, res) => {
   try {
     const [followups] = await pool.query(
       `SELECT l.*, COUNT(DISTINCT fu.id) as follow_up_count, MAX(fu.followed_up_at) as last_follow_up
        FROM leads l
        INNER JOIN follow_ups fu ON l.id = fu.lead_id
+       WHERE l.is_registered = FALSE OR l.is_registered IS NULL
        GROUP BY l.id HAVING follow_up_count > 0 ORDER BY last_follow_up DESC`
     );
     res.json({ success: true, followups, total: followups.length });
@@ -448,7 +449,7 @@ router.get('/leads/followups', async (req, res) => {
   }
 });
 
-// Get all leads
+// Get all leads — excludes registered students
 router.get('/leads', async (req, res) => {
   try {
     const [leads] = await pool.query(
@@ -459,6 +460,7 @@ router.get('/leads', async (req, res) => {
        FROM leads l
        LEFT JOIN follow_ups fu ON l.id = fu.lead_id
        LEFT JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
+       WHERE l.is_registered = FALSE OR l.is_registered IS NULL
        GROUP BY l.id ORDER BY l.created_at DESC`
     );
     res.json({ success: true, leads, total: leads.length });
