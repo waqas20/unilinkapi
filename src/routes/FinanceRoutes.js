@@ -18,19 +18,46 @@ const generateInvoiceId = async (connection) => {
 };
 
 // ============================================================
-// MIGRATION HELPER — run once to add new columns if missing
-// Call GET /finance/migrate to apply safely
+// MIGRATION — run GET /finance/migrate to apply safely
 // ============================================================
 router.get('/finance/migrate', async (req, res) => {
   const connection = await pool.getConnection();
   try {
-    // Add payment_method to invoices if not present
+    // payment_method column
     await connection.query(`
       ALTER TABLE invoices
       ADD COLUMN IF NOT EXISTS payment_method ENUM('bank','cash') NOT NULL DEFAULT 'bank'
     `).catch(() => {});
 
-    // Create invoice_selected_default_services table if not present
+    // show_converted_currency flag
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS show_converted_currency TINYINT(1) NOT NULL DEFAULT 1
+    `).catch(() => {});
+
+    // manual student columns on invoices
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS is_manual_student TINYINT(1) NOT NULL DEFAULT 0
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS manual_student_name VARCHAR(255) NULL
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS manual_student_email VARCHAR(255) NULL
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS manual_student_mobile VARCHAR(50) NULL
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoices
+      ADD COLUMN IF NOT EXISTS manual_student_country VARCHAR(100) NULL
+    `).catch(() => {});
+
+    // per-invoice selected default services
     await connection.query(`
       CREATE TABLE IF NOT EXISTS invoice_selected_default_services (
         id          INT AUTO_INCREMENT PRIMARY KEY,
@@ -40,6 +67,43 @@ router.get('/finance/migrate', async (req, res) => {
         created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
       )
+    `).catch(() => {});
+
+    // multi-student university commission table
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS invoice_commission_students (
+        id                  INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id          INT NOT NULL,
+        student_id          INT NULL,
+        student_name        VARCHAR(255) NOT NULL,
+        student_ref_id      VARCHAR(100) NULL,
+        student_email       VARCHAR(255) NULL,
+        student_mobile      VARCHAR(50) NULL,
+        is_manual           TINYINT(1) NOT NULL DEFAULT 0,
+        commission_amount   DECIMAL(15,2) NOT NULL DEFAULT 0,
+        university_name     VARCHAR(255) NULL,
+        commission_reference VARCHAR(255) NULL,
+        created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+      )
+    `).catch(() => {});
+
+    // manual student columns on invoice_agent_students
+    await connection.query(`
+      ALTER TABLE invoice_agent_students
+      ADD COLUMN IF NOT EXISTS is_manual TINYINT(1) NOT NULL DEFAULT 0
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoice_agent_students
+      ADD COLUMN IF NOT EXISTS student_email VARCHAR(255) NULL
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoice_agent_students
+      ADD COLUMN IF NOT EXISTS student_mobile VARCHAR(50) NULL
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoice_agent_students
+      ADD COLUMN IF NOT EXISTS student_country VARCHAR(100) NULL
     `).catch(() => {});
 
     res.json({ success: true, message: 'Migration applied successfully' });
@@ -176,7 +240,7 @@ router.delete('/finance/bank-accounts/:accountId', async (req, res) => {
 });
 
 // ============================================================
-// DEFAULT SERVICES (global list — managed from Finance page)
+// DEFAULT SERVICES
 // ============================================================
 
 router.get('/finance/default-services', async (req, res) => {
@@ -411,7 +475,7 @@ router.get('/finance/statistics', async (req, res) => {
 });
 
 // ============================================================
-// INVOICES
+// INVOICES — GET LIST
 // ============================================================
 
 router.get('/finance/invoices', async (req, res) => {
@@ -445,6 +509,10 @@ router.get('/finance/invoices', async (req, res) => {
         const [agentStudents] = await pool.query('SELECT * FROM invoice_agent_students WHERE invoice_id = ?', [inv.id]);
         inv.agent_students = agentStudents;
       }
+      if (inv.invoice_type === 'University Commission') {
+        const [commStudents] = await pool.query('SELECT * FROM invoice_commission_students WHERE invoice_id = ?', [inv.id]).catch(() => [[]]);
+        inv.commission_students = commStudents;
+      }
     }
 
     res.json({ success: true, invoices, total: invoices.length });
@@ -453,6 +521,10 @@ router.get('/finance/invoices', async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to fetch invoices' });
   }
 });
+
+// ============================================================
+// INVOICES — GET SINGLE
+// ============================================================
 
 router.get('/finance/invoices/:invoiceId', async (req, res) => {
   try {
@@ -470,14 +542,14 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
 
     if (invoices.length === 0) return res.status(404).json({ success: false, message: 'Invoice not found' });
 
-    const [extraServices]   = await pool.query('SELECT * FROM invoice_extra_services   WHERE invoice_id = ?', [invoiceId]);
-    const [countryServices] = await pool.query('SELECT * FROM invoice_country_services WHERE invoice_id = ?', [invoiceId]);
-    const [agentStudents]   = await pool.query('SELECT * FROM invoice_agent_students   WHERE invoice_id = ?', [invoiceId]);
+    const [extraServices]       = await pool.query('SELECT * FROM invoice_extra_services   WHERE invoice_id = ?', [invoiceId]);
+    const [countryServices]     = await pool.query('SELECT * FROM invoice_country_services WHERE invoice_id = ?', [invoiceId]);
+    const [agentStudents]       = await pool.query('SELECT * FROM invoice_agent_students   WHERE invoice_id = ?', [invoiceId]);
+    const [commissionStudents]  = await pool.query('SELECT * FROM invoice_commission_students WHERE invoice_id = ? ORDER BY id ASC', [invoiceId]).catch(() => [[]]);
 
-    // Fetch the per-invoice selected default services (not the global list)
+    // Per-invoice selected default services
     let defaultServices = [];
     if (invoices[0].invoice_type === 'Student') {
-      // Try per-invoice table first; fall back to global list for old invoices
       let [perInvoice] = await pool.query(
         'SELECT * FROM invoice_selected_default_services WHERE invoice_id = ? ORDER BY id ASC',
         [invoiceId]
@@ -486,7 +558,6 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
       if (perInvoice.length > 0) {
         defaultServices = perInvoice;
       } else {
-        // Backward compat: old invoices show all active default services
         const [ds] = await pool.query(
           'SELECT * FROM invoice_default_services WHERE is_active = 1 ORDER BY display_order ASC'
         );
@@ -494,12 +565,24 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
       }
     }
 
-    res.json({ success: true, invoice: invoices[0], extraServices, countryServices, agentStudents, defaultServices });
+    res.json({
+      success: true,
+      invoice: invoices[0],
+      extraServices,
+      countryServices,
+      agentStudents,
+      commissionStudents,
+      defaultServices
+    });
   } catch (error) {
     console.error('Error fetching invoice:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch invoice' });
   }
 });
+
+// ============================================================
+// INVOICES — CREATE
+// ============================================================
 
 router.post('/finance/invoices', async (req, res) => {
   const connection = await pool.getConnection();
@@ -508,16 +591,24 @@ router.post('/finance/invoices', async (req, res) => {
 
     const {
       invoiceType, invoiceDate, dueDate,
-      // payment method
       paymentMethod, bankAccountId,
-      studentId, visaId,
-      universityName, commissionReference,
+      // Student invoice — DB or manual
+      studentId,
+      isManualStudent,
+      manualStudentName, manualStudentEmail, manualStudentMobile, manualStudentCountry,
+      visaId,
+      // University Commission — now multi-student
+      commissionStudents,          // array: [{ isManual, studentId, studentName, studentRefId, studentEmail, studentMobile, universityName, commissionReference, commissionAmount }]
+      universityName,              // kept for backward compat / single-student fallback
+      commissionReference,
+      // Agent Commission
       agentId, agentCommissionPercent, agentStudents,
       baseAmount, discount, extraServices, selectedCountryServices,
-      selectedDefaultServices,         // new: array of { id, service_name }
+      selectedDefaultServices,
       finalAmount, gstPercent, gstAmount,
       notes,
-      selectedCurrency, exchangeRate, convertedAmount
+      selectedCurrency, exchangeRate, convertedAmount,
+      showConvertedCurrency,       // boolean — whether to show foreign currency on PDF
     } = req.body;
 
     if (!invoiceType || !invoiceDate) {
@@ -527,7 +618,6 @@ router.post('/finance/invoices', async (req, res) => {
 
     const resolvedPaymentMethod = paymentMethod === 'cash' ? 'cash' : 'bank';
 
-    // Validate bank account only when payment method is bank
     if (resolvedPaymentMethod === 'bank') {
       if (!bankAccountId) {
         await connection.rollback();
@@ -540,8 +630,17 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
+    // ── Resolve student info ──
     let studentName = null, studentRefId = null, studentEmail = null, studentMobile = null, studentCountry = null;
-    if (studentId && invoiceType !== 'Agent Commission') {
+    const resolvedIsManual = isManualStudent ? 1 : 0;
+
+    if (isManualStudent) {
+      // Manual entry — store provided details
+      studentName    = manualStudentName?.trim() || null;
+      studentEmail   = manualStudentEmail?.trim() || null;
+      studentMobile  = manualStudentMobile?.trim() || null;
+      studentCountry = manualStudentCountry?.trim() || null;
+    } else if (studentId && invoiceType !== 'Agent Commission') {
       const [students] = await connection.query(
         'SELECT name, middle_name, surname, student_id, email, mobile, country FROM users WHERE id = ?',
         [studentId]
@@ -556,6 +655,7 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
+    // ── Visa ──
     let visaRefId = null, visaType = null, visaCountry = null;
     if (visaId) {
       const [visas] = await connection.query('SELECT visa_id, visa_type FROM visas WHERE id = ?', [visaId]);
@@ -563,11 +663,25 @@ router.post('/finance/invoices', async (req, res) => {
       if (studentCountry) visaCountry = studentCountry;
     }
 
-    const extrasTotal       = Array.isArray(extraServices)
+    // ── Amount calculation ──
+    const extrasTotal      = Array.isArray(extraServices)
       ? extraServices.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0) : 0;
     const commissionPercent = parseFloat(agentCommissionPercent) || 0;
     const totalBase         = parseFloat(baseAmount) || 0;
-    const commissionAmount  = invoiceType === 'Agent Commission'
+
+    // For University Commission, total = sum of commissionStudents amounts
+    let resolvedFinalAmount = parseFloat(finalAmount) || 0;
+    let uniName             = universityName || null;
+    let uniRef              = commissionReference || null;
+
+    if (invoiceType === 'University Commission' && Array.isArray(commissionStudents) && commissionStudents.length > 0) {
+      resolvedFinalAmount = commissionStudents.reduce((sum, s) => sum + (parseFloat(s.commissionAmount) || 0), 0);
+      // For the main invoice record, use first student's uni info or keep provided
+      if (!uniName && commissionStudents[0]?.universityName) uniName = commissionStudents[0].universityName;
+      if (!uniRef  && commissionStudents[0]?.commissionReference) uniRef = commissionStudents[0].commissionReference;
+    }
+
+    const agentCommissionAmount = invoiceType === 'Agent Commission'
       ? (totalBase * commissionPercent / 100) : null;
 
     const resolvedGstPercent      = parseFloat(gstPercent) || 0;
@@ -575,6 +689,7 @@ router.post('/finance/invoices', async (req, res) => {
     const resolvedCurrency        = selectedCurrency || 'PKR';
     const resolvedExchangeRate    = resolvedCurrency === 'PKR' ? 1 : (parseFloat(exchangeRate) || 1);
     const resolvedConvertedAmount = resolvedCurrency === 'PKR' ? null : (parseFloat(convertedAmount) || null);
+    const resolvedShowConverted   = showConvertedCurrency === false ? 0 : 1; // default show
 
     const invoiceId = await generateInvoiceId(connection);
 
@@ -583,32 +698,46 @@ router.post('/finance/invoices', async (req, res) => {
        (invoice_id, invoice_type, invoice_date, due_date,
         payment_method, bank_account_id,
         student_id, student_name, student_ref_id, student_email, student_mobile, student_country,
+        is_manual_student, manual_student_name, manual_student_email, manual_student_mobile, manual_student_country,
         visa_id, visa_ref_id, visa_type, visa_country,
         university_name, commission_reference,
         agent_id, agent_commission_percent, agent_commission_amount,
         base_amount, discount, extra_services_total, final_amount,
         gst_percent, gst_amount,
         selected_currency, exchange_rate, converted_amount,
+        show_converted_currency,
         payment_status, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
       [
         invoiceId, invoiceType, invoiceDate, dueDate || null,
         resolvedPaymentMethod, resolvedPaymentMethod === 'bank' ? (bankAccountId || null) : null,
-        studentId || null, studentName, studentRefId, studentEmail, studentMobile, studentCountry,
+        isManualStudent ? null : (studentId || null),
+        isManualStudent ? (manualStudentName?.trim() || null) : studentName,
+        isManualStudent ? null : studentRefId,
+        isManualStudent ? (manualStudentEmail?.trim() || null) : studentEmail,
+        isManualStudent ? (manualStudentMobile?.trim() || null) : studentMobile,
+        isManualStudent ? (manualStudentCountry?.trim() || null) : studentCountry,
+        resolvedIsManual,
+        isManualStudent ? (manualStudentName?.trim() || null) : null,
+        isManualStudent ? (manualStudentEmail?.trim() || null) : null,
+        isManualStudent ? (manualStudentMobile?.trim() || null) : null,
+        isManualStudent ? (manualStudentCountry?.trim() || null) : null,
         visaId || null, visaRefId, visaType, visaCountry,
-        universityName || null, commissionReference || null,
+        uniName, uniRef,
         agentId || null, commissionPercent || null,
-        invoiceType === 'Agent Commission' ? commissionAmount : null,
-        totalBase, parseFloat(discount) || 0, extrasTotal, parseFloat(finalAmount) || 0,
+        invoiceType === 'Agent Commission' ? agentCommissionAmount : null,
+        totalBase, parseFloat(discount) || 0, extrasTotal,
+        invoiceType === 'University Commission' ? resolvedFinalAmount : (parseFloat(finalAmount) || 0),
         resolvedGstPercent, resolvedGstAmount,
         resolvedCurrency, resolvedExchangeRate, resolvedConvertedAmount,
+        resolvedShowConverted,
         notes || null
       ]
     );
 
     const newInvoiceId = result.insertId;
 
-    // Extra services
+    // ── Extra services ──
     if (Array.isArray(extraServices) && extraServices.length > 0) {
       for (const svc of extraServices) {
         if (svc.name) {
@@ -620,7 +749,7 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
-    // Country services
+    // ── Country services ──
     if (Array.isArray(selectedCountryServices) && selectedCountryServices.length > 0) {
       for (const cs of selectedCountryServices) {
         await connection.query(
@@ -630,26 +759,68 @@ router.post('/finance/invoices', async (req, res) => {
       }
     }
 
-    // Per-invoice selected default services (Student only)
+    // ── Selected default services (Student only) ──
     if (invoiceType === 'Student' && Array.isArray(selectedDefaultServices) && selectedDefaultServices.length > 0) {
       for (const ds of selectedDefaultServices) {
         await connection.query(
           'INSERT INTO invoice_selected_default_services (invoice_id, service_id, service_name) VALUES (?, ?, ?)',
           [newInvoiceId, ds.id || null, ds.service_name]
-        ).catch(async () => {
-          // If table doesn't exist yet, silently skip (tell user to run migration)
+        ).catch(() => {
           console.warn('invoice_selected_default_services table missing — run GET /finance/migrate');
         });
       }
     }
 
-    // Agent students
+    // ── Agent students ──
     if (invoiceType === 'Agent Commission' && Array.isArray(agentStudents) && agentStudents.length > 0) {
       for (const s of agentStudents) {
         await connection.query(
-          'INSERT INTO invoice_agent_students (invoice_id, student_id, student_name, student_ref_id) VALUES (?, ?, ?, ?)',
-          [newInvoiceId, s.id, s.student_name, s.student_ref_id]
-        );
+          `INSERT INTO invoice_agent_students
+           (invoice_id, student_id, student_name, student_ref_id, is_manual, student_email, student_mobile, student_country)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newInvoiceId,
+            s.isManual ? null : (s.id || null),
+            s.student_name,
+            s.student_ref_id || null,
+            s.isManual ? 1 : 0,
+            s.student_email || null,
+            s.student_mobile || null,
+            s.student_country || null
+          ]
+        ).catch(async () => {
+          // Fallback if extra columns don't exist yet
+          await connection.query(
+            'INSERT INTO invoice_agent_students (invoice_id, student_id, student_name, student_ref_id) VALUES (?, ?, ?, ?)',
+            [newInvoiceId, s.isManual ? null : (s.id || null), s.student_name, s.student_ref_id || null]
+          );
+        });
+      }
+    }
+
+    // ── University Commission students (multi-student) ──
+    if (invoiceType === 'University Commission' && Array.isArray(commissionStudents) && commissionStudents.length > 0) {
+      for (const s of commissionStudents) {
+        await connection.query(
+          `INSERT INTO invoice_commission_students
+           (invoice_id, student_id, student_name, student_ref_id, student_email, student_mobile,
+            is_manual, commission_amount, university_name, commission_reference)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            newInvoiceId,
+            s.isManual ? null : (s.studentId || null),
+            s.studentName || '',
+            s.isManual ? null : (s.studentRefId || null),
+            s.studentEmail || null,
+            s.studentMobile || null,
+            s.isManual ? 1 : 0,
+            parseFloat(s.commissionAmount) || 0,
+            s.universityName || null,
+            s.commissionReference || null
+          ]
+        ).catch(err => {
+          console.warn('invoice_commission_students insert error — run GET /finance/migrate:', err.message);
+        });
       }
     }
 
@@ -667,7 +838,10 @@ router.post('/finance/invoices', async (req, res) => {
   }
 });
 
-// PUT — update invoice
+// ============================================================
+// INVOICES — UPDATE
+// ============================================================
+
 router.put('/finance/invoices/:invoiceId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -678,7 +852,8 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       bankAccountId, baseAmount, discount, gstPercent, gstAmount, finalAmount,
       invoiceDate, dueDate, universityName, commissionReference,
       agentId, agentCommissionPercent, agentCommissionAmount,
-      notes
+      notes,
+      showConvertedCurrency,
     } = req.body;
 
     const [existing] = await connection.query('SELECT id FROM invoices WHERE id = ?', [invoiceId]);
@@ -688,6 +863,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
     }
 
     const safeFloat = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
+    const resolvedShowConverted = showConvertedCurrency === false || showConvertedCurrency === 0 ? 0 : 1;
 
     await connection.query(
       `UPDATE invoices SET
@@ -705,6 +881,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         agent_id=COALESCE(?,agent_id),
         agent_commission_percent=COALESCE(?,agent_commission_percent),
         agent_commission_amount=COALESCE(?,agent_commission_amount),
+        show_converted_currency=?,
         notes=?
        WHERE id=?`,
       [
@@ -724,6 +901,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         agentId || null,
         safeFloat(agentCommissionPercent),
         safeFloat(agentCommissionAmount),
+        resolvedShowConverted,
         notes || null,
         invoiceId
       ]
@@ -739,6 +917,10 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
     connection.release();
   }
 });
+
+// ============================================================
+// INVOICES — DELETE
+// ============================================================
 
 router.delete('/finance/invoices/:invoiceId', async (req, res) => {
   const connection = await pool.getConnection();
@@ -846,7 +1028,7 @@ router.delete('/countries/:countryId/services/:serviceId', async (req, res) => {
   }
 });
 
-// GET student visas
+// ── Student visas ──
 router.get('/finance/student-visas/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
