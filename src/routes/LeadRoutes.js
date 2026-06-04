@@ -67,11 +67,19 @@ const generatePassword = (length = 12) => {
 //   ALTER TABLE leads
 //     ADD COLUMN IF NOT EXISTS program      VARCHAR(100)  NULL,
 //     ADD COLUMN IF NOT EXISTS grades       TEXT          NULL,
-//     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT      NULL;
+//     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT      NULL,
+//     ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) DEFAULT 'Unpaid';
 //
 // The `course` column is no longer used by the app but can be left in place
 // or dropped at your convenience:
 //   ALTER TABLE leads DROP COLUMN course;
+//
+// For the users table, ensure the following columns exist (they should already
+// be there from the students module):
+//   middle_name, surname, alternative_email, landline, postal_code,
+//   nationality, marital_status, gender, city_of_birth, country_of_birth,
+//   passport_no, passport_issue_date, passport_place_of_issue,
+//   source_inquiry, payment_status VARCHAR(20) DEFAULT 'Unpaid'
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Create new lead (First Time Query)
@@ -164,7 +172,6 @@ router.post('/leads', async (req, res) => {
 });
 
 // Lookup lead for follow-up
-// Accepts: lookupName (required) + one or both of lookupEmail / lookupPhone
 router.post('/leads/lookup', async (req, res) => {
   try {
     const { lookupName, lookupEmail, lookupPhone, purposeOfVisit } = req.body;
@@ -194,7 +201,6 @@ router.post('/leads/lookup', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Purpose of visit is required' });
     }
 
-    // Build dynamic WHERE clause: name is always required; match email OR phone
     let whereClause = 'LOWER(TRIM(full_name)) = LOWER(?)';
     const queryParams = [trimmedName];
 
@@ -206,7 +212,6 @@ router.post('/leads/lookup', async (req, res) => {
       whereClause += ' AND LOWER(TRIM(email)) = LOWER(?)';
       queryParams.push(lookupEmail.trim().toLowerCase());
     } else {
-      // phone only — strip non-digits and do a suffix match to handle country code variants
       whereClause += ' AND REPLACE(REPLACE(REPLACE(phone, " ", ""), "-", ""), "+", "") LIKE ?';
       const normalizedPhone = '%' + lookupPhone.trim().replace(/\D/g, '');
       queryParams.push(normalizedPhone);
@@ -231,7 +236,6 @@ router.post('/leads/lookup', async (req, res) => {
       });
     }
 
-    // Save the purpose of visit against this lead record
     await pool.query(
       'UPDATE leads SET purpose_of_visit = ? WHERE id = ?',
       [purposeOfVisit.trim(), leads[0].id]
@@ -331,7 +335,6 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       ? JSON.stringify(countriesOfInterest)
       : null;
     
-    // Track changes
     const changes = [];
     const fieldsToTrack = {
       fullName: 'full_name',
@@ -563,13 +566,62 @@ router.put('/leads/:leadId', async (req, res) => {
   }
 });
 
-// Register lead as student
+// ─── Register lead as student ─────────────────────────────────────────────────
+// Now accepts `applicantInfo` (full Applicant's Information form) and
+// `paymentStatus`. Registration is blocked if paymentStatus !== 'Paid'.
+// The applicantInfo fields are saved directly into the users row.
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/leads/:leadId/register-student', async (req, res) => {
   const connection = await pool.getConnection();
   
   try {
     await connection.beginTransaction();
     const { leadId } = req.params;
+    const { applicantInfo = {}, paymentStatus = 'Unpaid' } = req.body;
+
+    // ── Payment gate ──────────────────────────────────────────────────────────
+    if (paymentStatus !== 'Paid') {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Payment must be completed (Paid) before registering the student.'
+      });
+    }
+
+    // ── Validate required applicant fields ────────────────────────────────────
+    const {
+      name, middle_name, surname,
+      nationality, marital_status, gender,
+      dob, city_of_birth, country_of_birth,
+      passport_no, passport_issue_date, passport_place_of_issue,
+      address, postal_code, mobile, landline,
+      email, alternative_email,
+      course, source_inquiry,
+      status: studentStatus,
+    } = applicantInfo;
+
+    if (!name || !name.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'First name is required.' });
+    }
+    if (!surname || !surname.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Last name is required.' });
+    }
+    if (!mobile || !mobile.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Mobile number is required.' });
+    }
+    if (!address || !address.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Address is required.' });
+    }
+    if (!dob) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Date of birth is required.' });
+    }
+
+    // ── Fetch the lead ────────────────────────────────────────────────────────
     const [leads] = await connection.query('SELECT * FROM leads WHERE id = ?', [leadId]);
     if (leads.length === 0) {
       await connection.rollback();
@@ -580,25 +632,83 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'This lead is already registered as a student' });
     }
-    const [existingUser] = await connection.query('SELECT id FROM users WHERE email = ?', [lead.email]);
+
+    // Use applicantInfo.email if provided, else fall back to lead email
+    const registrationEmail = (email && email.trim())
+      ? email.trim().toLowerCase()
+      : lead.email;
+
+    const [existingUser] = await connection.query(
+      'SELECT id FROM users WHERE email = ?', [registrationEmail]
+    );
     if (existingUser.length > 0) {
       await connection.rollback();
       return res.status(409).json({ success: false, message: 'A user with this email already exists in the system' });
     }
+
+    // ── Generate student ID ───────────────────────────────────────────────────
     const currentYear = new Date().getFullYear();
-    const [result] = await connection.query(
+    const [idResult] = await connection.query(
       `SELECT MAX(CAST(SUBSTRING(student_id, 8) AS UNSIGNED)) as max_id 
        FROM users WHERE student_id LIKE 'STU${currentYear}%' AND role = 'client'`
     );
-    const nextId = (result[0].max_id || 0) + 1;
+    const nextId = (idResult[0].max_id || 0) + 1;
     const studentId = `STU${currentYear}${String(nextId).padStart(3, '0')}`;
+
+    // ── Create password ───────────────────────────────────────────────────────
     const generatedPassword = generatePassword(12);
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+
+    // ── Format dob ───────────────────────────────────────────────────────────
+    const formattedDob = dob.split('T')[0];
+    const formattedPassportDate = passport_issue_date
+      ? passport_issue_date.split('T')[0]
+      : null;
+
+    // ── Insert user with full applicant info ──────────────────────────────────
     const [userResult] = await connection.query(
-      'INSERT INTO users (student_id, name, email, password, role) VALUES (?, ?, ?, ?, ?)',
-      [studentId, lead.full_name, lead.email, hashedPassword, 'client']
+      `INSERT INTO users 
+         (student_id, name, middle_name, surname,
+          email, alternative_email,
+          mobile, landline,
+          address, postal_code,
+          nationality, marital_status, gender,
+          dob, city_of_birth, country_of_birth,
+          passport_no, passport_issue_date, passport_place_of_issue,
+          course, source_inquiry,
+          payment_status,
+          password, role, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+      [
+        studentId,
+        name.trim(),
+        middle_name?.trim() || null,
+        surname.trim(),
+        registrationEmail,
+        alternative_email?.trim() || null,
+        mobile.trim(),
+        landline?.trim() || null,
+        address.trim(),
+        postal_code?.trim() || null,
+        nationality?.trim() || null,
+        marital_status || null,
+        gender || null,
+        formattedDob,
+        city_of_birth?.trim() || null,
+        country_of_birth?.trim() || null,
+        passport_no?.trim() || null,
+        formattedPassportDate,
+        passport_place_of_issue?.trim() || null,
+        course?.trim() || null,
+        source_inquiry || null,
+        'Paid',         // payment_status
+        hashedPassword,
+        studentStatus || 'Active',
+      ]
     );
     const userId = userResult.insertId;
+
+    // ── Transfer assigned counselors ──────────────────────────────────────────
     const [assignedCounselors] = await connection.query(
       'SELECT counselor_id FROM lead_counselor_assignments WHERE lead_id = ?', [leadId]
     );
@@ -609,15 +719,27 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         [studentCounselorValues]
       );
     }
-    await connection.query('UPDATE counselor_meetings SET user_id = ?, lead_id = NULL WHERE lead_id = ?', [userId, leadId]);
-    await connection.query('UPDATE leads SET is_registered = TRUE, registered_at = NOW() WHERE id = ?', [leadId]);
+
+    // ── Transfer meetings ─────────────────────────────────────────────────────
+    await connection.query(
+      'UPDATE counselor_meetings SET user_id = ?, lead_id = NULL WHERE lead_id = ?',
+      [userId, leadId]
+    );
+
+    // ── Mark lead as registered and store payment status ──────────────────────
+    await connection.query(
+      'UPDATE leads SET is_registered = TRUE, registered_at = NOW(), payment_status = ? WHERE id = ?',
+      ['Paid', leadId]
+    );
+
     await connection.commit();
     res.json({
       success: true,
       message: 'Lead successfully registered as student',
       userId,
+      studentId,
       counselorsTransferred: assignedCounselors.length,
-      credentials: { email: lead.email, password: generatedPassword }
+      credentials: { email: registrationEmail, password: generatedPassword }
     });
   } catch (error) {
     await connection.rollback();
@@ -862,4 +984,4 @@ router.put('/meetings/:meetingId/notes', upload.single('notesImage'), async (req
   }
 });
 
-export default router;
+export default router;  
