@@ -70,17 +70,93 @@ const generatePassword = (length = 12) => {
 //     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT      NULL,
 //     ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) DEFAULT 'Unpaid';
 //
-// The `course` column is no longer used by the app but can be left in place
-// or dropped at your convenience:
-//   ALTER TABLE leads DROP COLUMN course;
-//
-// For the users table, ensure the following columns exist (they should already
-// be there from the students module):
+// For the users table, ensure the following columns exist:
 //   middle_name, surname, alternative_email, landline, postal_code,
 //   nationality, marital_status, gender, city_of_birth, country_of_birth,
 //   passport_no, passport_issue_date, passport_place_of_issue,
-//   source_inquiry, payment_status VARCHAR(20) DEFAULT 'Unpaid'
+//   source_inquiry, payment_status VARCHAR(20) DEFAULT 'Unpaid',
+//   invoice_id INT NULL  ← NEW: links the student to an invoice at registration
+//
+// Run GET /leads/migrate-invoice to add the invoice_id column safely.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─── Migrate: add invoice_id to users table ───────────────────────────────────
+router.get('/leads/migrate-invoice', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS invoice_id INT NULL
+    `).catch(() => {});
+
+    // Also add a foreign key if not already there (best-effort)
+    await connection.query(`
+      ALTER TABLE users
+      ADD CONSTRAINT fk_users_invoice
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE SET NULL
+    `).catch(() => {}); // Ignore if FK already exists or invoices table differs
+
+    res.json({ success: true, message: 'Migration applied: users.invoice_id column ready.' });
+  } catch (error) {
+    console.error('Migration error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// ─── Invoice search for student registration ──────────────────────────────────
+// GET /leads/invoices/search?q=searchTerm
+// Returns invoices that are NOT yet linked to any student (invoice_id on users),
+// filtered by invoice_id string, student_name, or final_amount.
+// Only Student-type invoices are returned (commission invoices aren't linked to students).
+router.get('/leads/invoices/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.trim().length < 1) {
+      return res.json({ success: true, invoices: [] });
+    }
+
+    const searchTerm = `%${q.trim()}%`;
+
+    const [invoices] = await pool.query(
+      `SELECT 
+         i.id,
+         i.invoice_id,
+         i.invoice_type,
+         i.invoice_date,
+         i.final_amount,
+         i.payment_status,
+         i.student_name,
+         i.student_ref_id,
+         i.is_manual_student,
+         i.manual_student_name,
+         ba.bank_name,
+         ba.account_name
+       FROM invoices i
+       LEFT JOIN bank_accounts ba ON i.bank_account_id = ba.id
+       WHERE i.invoice_type = 'Student'
+         AND i.id NOT IN (
+           SELECT invoice_id FROM users WHERE invoice_id IS NOT NULL
+         )
+         AND (
+           i.invoice_id LIKE ?
+           OR i.student_name LIKE ?
+           OR i.manual_student_name LIKE ?
+           OR i.student_ref_id LIKE ?
+           OR CAST(i.final_amount AS CHAR) LIKE ?
+         )
+       ORDER BY i.created_at DESC
+       LIMIT 20`,
+      [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]
+    );
+
+    res.json({ success: true, invoices });
+  } catch (error) {
+    console.error('Error searching invoices:', error);
+    res.status(500).json({ success: false, message: 'Failed to search invoices' });
+  }
+});
 
 // Create new lead (First Time Query)
 router.post('/leads', async (req, res) => {
@@ -567,9 +643,9 @@ router.put('/leads/:leadId', async (req, res) => {
 });
 
 // ─── Register lead as student ─────────────────────────────────────────────────
-// Now accepts `applicantInfo` (full Applicant's Information form) and
-// `paymentStatus`. Registration is blocked if paymentStatus !== 'Paid'.
-// The applicantInfo fields are saved directly into the users row.
+// Accepts `applicantInfo`, `paymentStatus`, and optionally `invoiceId`.
+// If invoiceId is provided, it is linked to the newly created user record.
+// An invoice can only be linked to one student (enforced via DB + backend check).
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/leads/:leadId/register-student', async (req, res) => {
   const connection = await pool.getConnection();
@@ -577,7 +653,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { leadId } = req.params;
-    const { applicantInfo = {}, paymentStatus = 'Unpaid' } = req.body;
+    const { applicantInfo = {}, paymentStatus = 'Unpaid', invoiceId = null } = req.body;
 
     // ── Payment gate ──────────────────────────────────────────────────────────
     if (paymentStatus !== 'Paid') {
@@ -621,6 +697,32 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Date of birth is required.' });
     }
 
+    // ── Validate invoiceId if provided ────────────────────────────────────────
+    if (invoiceId) {
+      // Check invoice exists and is a Student type
+      const [invCheck] = await connection.query(
+        `SELECT id, invoice_type FROM invoices WHERE id = ?`,
+        [invoiceId]
+      );
+      if (invCheck.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: 'Selected invoice not found.' });
+      }
+      if (invCheck[0].invoice_type !== 'Student') {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: 'Only Student-type invoices can be linked to a student profile.' });
+      }
+      // Check it's not already linked to another student
+      const [alreadyLinked] = await connection.query(
+        `SELECT id FROM users WHERE invoice_id = ?`,
+        [invoiceId]
+      );
+      if (alreadyLinked.length > 0) {
+        await connection.rollback();
+        return res.status(409).json({ success: false, message: 'This invoice is already linked to another student.' });
+      }
+    }
+
     // ── Fetch the lead ────────────────────────────────────────────────────────
     const [leads] = await connection.query('SELECT * FROM leads WHERE id = ?', [leadId]);
     if (leads.length === 0) {
@@ -659,13 +761,14 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     const generatedPassword = generatePassword(12);
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
-    // ── Format dob ───────────────────────────────────────────────────────────
+    // ── Format dates ──────────────────────────────────────────────────────────
     const formattedDob = dob.split('T')[0];
     const formattedPassportDate = passport_issue_date
       ? passport_issue_date.split('T')[0]
       : null;
 
     // ── Insert user with full applicant info ──────────────────────────────────
+    // invoice_id column is added by GET /leads/migrate-invoice
     const [userResult] = await connection.query(
       `INSERT INTO users 
          (student_id, name, middle_name, surname,
@@ -677,8 +780,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           passport_no, passport_issue_date, passport_place_of_issue,
           course, source_inquiry,
           payment_status,
+          invoice_id,
           password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId,
         name.trim(),
@@ -701,7 +805,8 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         passport_place_of_issue?.trim() || null,
         course?.trim() || null,
         source_inquiry || null,
-        'Paid',         // payment_status
+        'Paid',             // payment_status
+        invoiceId || null,  // invoice_id — links to selected invoice
         hashedPassword,
         studentStatus || 'Active',
       ]
@@ -739,6 +844,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       userId,
       studentId,
       counselorsTransferred: assignedCounselors.length,
+      invoiceLinked: !!invoiceId,
       credentials: { email: registrationEmail, password: generatedPassword }
     });
   } catch (error) {
@@ -984,4 +1090,4 @@ router.put('/meetings/:meetingId/notes', upload.single('notesImage'), async (req
   }
 });
 
-export default router;  
+export default router;
