@@ -60,6 +60,22 @@ const generatePassword = (length = 12) => {
   return password;
 };
 
+const serializeQualifications = (qualifications) => {
+  if (!Array.isArray(qualifications) || qualifications.length === 0) return null;
+  const filtered = qualifications.filter(q => q.qualification?.trim() || q.subject?.trim() || q.grade?.trim());
+  return filtered.length > 0 ? JSON.stringify(filtered) : null;
+};
+
+const serializeAdmissionTests = (admissionTests) => {
+  if (!admissionTests || typeof admissionTests !== 'object') return null;
+  return JSON.stringify(admissionTests);
+};
+
+const serializeCountries = (countriesOfInterest) => {
+  if (!Array.isArray(countriesOfInterest) || countriesOfInterest.length === 0) return null;
+  return JSON.stringify(countriesOfInterest);
+};
+
 // ─── DB Migration Note ────────────────────────────────────────────────────────
 // Run the following ALTER statements once against your MySQL database if you
 // haven't already added these columns:
@@ -68,7 +84,12 @@ const generatePassword = (length = 12) => {
 //     ADD COLUMN IF NOT EXISTS program      VARCHAR(100)  NULL,
 //     ADD COLUMN IF NOT EXISTS grades       TEXT          NULL,
 //     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT      NULL,
-//     ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) DEFAULT 'Unpaid';
+//     ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) DEFAULT 'Unpaid',
+//     ADD COLUMN IF NOT EXISTS qualifications TEXT        NULL,
+//     ADD COLUMN IF NOT EXISTS counsellor_notes TEXT      NULL,
+//     ADD COLUMN IF NOT EXISTS referred_by  VARCHAR(255)  NULL,
+//     ADD COLUMN IF NOT EXISTS countries_other VARCHAR(255) NULL,
+//     ADD COLUMN IF NOT EXISTS admission_tests TEXT       NULL;
 //
 // For the users table, ensure the following columns exist:
 //   middle_name, surname, alternative_email, landline, postal_code,
@@ -167,8 +188,9 @@ router.post('/leads', async (req, res) => {
     
     const {
       fullName, email, phone, address,
-      interest, program, comments,
-      countriesOfInterest, grades, qualification
+      interest, program,
+      countriesOfInterest, countriesOther,
+      qualifications, referredBy, counsellorNotes, admissionTests
     } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
@@ -214,19 +236,22 @@ router.post('/leads', async (req, res) => {
       });
     }
 
-    const countriesJson = Array.isArray(countriesOfInterest) && countriesOfInterest.length > 0
-      ? JSON.stringify(countriesOfInterest)
-      : null;
+    const countriesJson = serializeCountries(countriesOfInterest);
+    const qualificationsJson = serializeQualifications(qualifications);
+    const admissionTestsJson = serializeAdmissionTests(admissionTests);
     
     const [result] = await connection.query(
       `INSERT INTO leads
-         (full_name, email, phone, address, interest, program, comments,
-          countries_of_interest, grades, qualification, is_follow_up, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
+         (full_name, email, phone, address, interest, program,
+          countries_of_interest, countries_other, qualifications,
+          referred_by, counsellor_notes, admission_tests, is_follow_up, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
       [
         trimmedName, trimmedEmail, trimmedPhone, address.trim(),
-        interest.trim(), program?.trim() || null, comments?.trim() || null,
-        countriesJson, grades?.trim() || null, qualification?.trim() || null
+        interest.trim(), program?.trim() || null,
+        countriesJson, countriesOther?.trim() || null, qualificationsJson,
+        referredBy?.trim() || null, counsellorNotes?.trim() || null,
+        admissionTestsJson
       ]
     );
     
@@ -295,7 +320,8 @@ router.post('/leads/lookup', async (req, res) => {
     
     const [leads] = await pool.query(
       `SELECT id, full_name, email, phone, address, interest, program, comments,
-              countries_of_interest, grades, qualification,
+              countries_of_interest, countries_other, grades, qualification, qualifications,
+              referred_by, counsellor_notes, admission_tests,
               (SELECT COUNT(*) FROM follow_ups WHERE lead_id = leads.id) as follow_up_count,
               created_at, updated_at
        FROM leads 
@@ -339,8 +365,9 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     const { leadId } = req.params;
     const {
       fullName, email, phone, address,
-      interest, program, comments,
-      countriesOfInterest, grades, qualification,
+      interest, program,
+      countriesOfInterest, countriesOther,
+      qualifications, referredBy, counsellorNotes, admissionTests,
       purposeOfVisit
     } = req.body;
     
@@ -407,9 +434,9 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     
     const followUpId = followUpResult.insertId;
 
-    const countriesJson = Array.isArray(countriesOfInterest) && countriesOfInterest.length > 0
-      ? JSON.stringify(countriesOfInterest)
-      : null;
+    const countriesJson = serializeCountries(countriesOfInterest);
+    const qualificationsJson = serializeQualifications(qualifications);
+    const admissionTestsJson = serializeAdmissionTests(admissionTests);
     
     const changes = [];
     const fieldsToTrack = {
@@ -419,10 +446,12 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       address: 'address',
       interest: 'interest',
       program: 'program',
-      comments: 'comments',
+      counsellorNotes: 'counsellor_notes',
       countriesOfInterest: 'countries_of_interest',
-      grades: 'grades',
-      qualification: 'qualification'
+      countriesOther: 'countries_other',
+      qualifications: 'qualifications',
+      referredBy: 'referred_by',
+      admissionTests: 'admission_tests'
     };
 
     const newValues = {
@@ -432,10 +461,12 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       address: address.trim(),
       interest: interest.trim(),
       program: program?.trim() || null,
-      comments: comments?.trim() || null,
+      counsellorNotes: counsellorNotes?.trim() || null,
       countriesOfInterest: countriesJson,
-      grades: grades?.trim() || null,
-      qualification: qualification?.trim() || null
+      countriesOther: countriesOther?.trim() || null,
+      qualifications: qualificationsJson,
+      referredBy: referredBy?.trim() || null,
+      admissionTests: admissionTestsJson
     };
     
     for (const [requestField, dbField] of Object.entries(fieldsToTrack)) {
@@ -458,14 +489,16 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     await connection.query(
       `UPDATE leads 
        SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
-           comments = ?, countries_of_interest = ?, grades = ?, qualification = ?,
+           countries_of_interest = ?, countries_other = ?, qualifications = ?,
+           referred_by = ?, counsellor_notes = ?, admission_tests = ?,
            purpose_of_visit = ?, is_follow_up = TRUE
        WHERE id = ?`,
       [
         trimmedName, trimmedEmail, trimmedPhone, address.trim(),
         interest.trim(), program?.trim() || null,
-        comments?.trim() || null, countriesJson,
-        grades?.trim() || null, qualification?.trim() || null,
+        countriesJson, countriesOther?.trim() || null, qualificationsJson,
+        referredBy?.trim() || null, counsellorNotes?.trim() || null,
+        admissionTestsJson,
         purposeOfVisit?.trim() || oldData.purpose_of_visit || null,
         leadId
       ]
@@ -577,8 +610,10 @@ router.put('/leads/:leadId', async (req, res) => {
     const { leadId } = req.params;
     const {
       fullName, email, phone, address,
-      interest, program, comments,
-      status, countriesOfInterest, grades, qualification
+      interest, program, comments, counsellorNotes,
+      status, countriesOfInterest, countriesOther,
+      grades, qualification, qualifications,
+      referredBy, admissionTests
     } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
@@ -612,20 +647,28 @@ router.put('/leads/:leadId', async (req, res) => {
       return res.status(409).json({ success: false, message: 'This email address is already associated with another lead' });
     }
 
-    const countriesJson = Array.isArray(countriesOfInterest) && countriesOfInterest.length > 0
-      ? JSON.stringify(countriesOfInterest)
-      : null;
+    const countriesJson = serializeCountries(countriesOfInterest);
+    const qualificationsJson = qualifications
+      ? serializeQualifications(qualifications)
+      : (qualification?.trim() || grades?.trim()
+        ? JSON.stringify([{ qualification: qualification?.trim() || '', subject: '', grade: grades?.trim() || '' }])
+        : null);
+    const notesValue = counsellorNotes?.trim() || comments?.trim() || null;
+    const admissionTestsJson = serializeAdmissionTests(admissionTests);
     
     await connection.query(
       `UPDATE leads 
        SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
-           comments = ?, status = ?, countries_of_interest = ?, grades = ?, qualification = ?
+           counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
+           qualifications = ?, referred_by = ?, admission_tests = ?
        WHERE id = ?`,
       [
         trimmedName, trimmedEmail, trimmedPhone, address.trim(),
         interest.trim(), program?.trim() || null,
-        comments?.trim() || null, status || 'New',
-        countriesJson, grades?.trim() || null, qualification?.trim() || null,
+        notesValue, status || 'New',
+        countriesJson, countriesOther?.trim() || null,
+        qualificationsJson, referredBy?.trim() || null,
+        admissionTestsJson,
         leadId
       ]
     );
