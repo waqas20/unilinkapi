@@ -96,6 +96,40 @@ router.get('/students', async (req, res) => {
 });
 
 // Get single student by ID with all details
+router.get('/students/:studentId/credentials', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const [students] = await pool.query(
+      `SELECT id, student_id, name, middle_name, surname, email, plain_password
+       FROM users WHERE id = ? AND role = 'client'`,
+      [studentId]
+    );
+    if (students.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+    const student = students[0];
+    if (!student.plain_password) {
+      return res.status(404).json({
+        success: false,
+        message: 'Login credentials are not available for this student. Only students created after credential storage was enabled have a retrievable password.'
+      });
+    }
+    res.json({
+      success: true,
+      credentials: {
+        email: student.email,
+        password: student.plain_password,
+        studentName: [student.name, student.middle_name, student.surname].filter(Boolean).join(' '),
+        studentRefId: student.student_id
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching student credentials:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch student credentials' });
+  }
+});
+
+// Get single student by ID with all details
 router.get('/students/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
@@ -234,8 +268,8 @@ router.post('/students', async (req, res) => {
        address, postal_code, country, dob, nationality, marital_status, gender,
        city_of_birth, country_of_birth, passport_no, passport_issue_date, passport_place_of_issue,
        guardian_name, guardian_relation, guardian_mobile, guardian_email,
-       source_inquiry, course, password, role, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
+       source_inquiry, course, password, plain_password, role, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
       [
         studentId, firstName.trim(), middleName?.trim() || null, surname.trim(),
         trimmedEmail, alternativeEmail?.trim() || null,
@@ -250,7 +284,8 @@ router.post('/students', async (req, res) => {
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, course?.trim() || null,
-        hashedPassword
+        hashedPassword,
+        generatedPassword
       ]
     );
 

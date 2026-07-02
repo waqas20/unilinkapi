@@ -1067,8 +1067,8 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           course, source_inquiry,
           payment_status,
           invoice_id,
-          password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+          password, plain_password, role, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId,
         name.trim(),
@@ -1094,6 +1094,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         leadPaymentStatus,
         invoiceId || null,
         hashedPassword,
+        generatedPassword,
         studentStatus || 'Active',
       ]
     );
