@@ -57,6 +57,15 @@ router.get('/finance/migrate', async (req, res) => {
       ADD COLUMN IF NOT EXISTS manual_student_country VARCHAR(100) NULL
     `).catch(() => {});
 
+    await connection.query(`
+      ALTER TABLE invoice_country_services
+      ADD COLUMN IF NOT EXISTS country_id INT NULL
+    `).catch(() => {});
+    await connection.query(`
+      ALTER TABLE invoice_country_services
+      ADD COLUMN IF NOT EXISTS country_name VARCHAR(255) NULL
+    `).catch(() => {});
+
     // per-invoice selected default services
     await connection.query(`
       CREATE TABLE IF NOT EXISTS invoice_selected_default_services (
@@ -543,7 +552,10 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
     if (invoices.length === 0) return res.status(404).json({ success: false, message: 'Invoice not found' });
 
     const [extraServices]       = await pool.query('SELECT * FROM invoice_extra_services   WHERE invoice_id = ?', [invoiceId]);
-    const [countryServices]     = await pool.query('SELECT * FROM invoice_country_services WHERE invoice_id = ?', [invoiceId]);
+    const [countryServices]     = await pool.query(
+      'SELECT * FROM invoice_country_services WHERE invoice_id = ? ORDER BY country_name ASC, id ASC',
+      [invoiceId]
+    );
     const [agentStudents]       = await pool.query('SELECT * FROM invoice_agent_students   WHERE invoice_id = ?', [invoiceId]);
     const [commissionStudents]  = await pool.query('SELECT * FROM invoice_commission_students WHERE invoice_id = ? ORDER BY id ASC', [invoiceId]).catch(() => [[]]);
 
@@ -596,7 +608,7 @@ router.post('/finance/invoices', async (req, res) => {
       studentId,
       isManualStudent,
       manualStudentName, manualStudentEmail, manualStudentMobile, manualStudentCountry,
-      visaId,
+      selectedCountries,
       // University Commission — now multi-student
       commissionStudents,          // array: [{ isManual, studentId, studentName, studentRefId, studentEmail, studentMobile, universityName, commissionReference, commissionAmount }]
       universityName,              // kept for backward compat / single-student fallback
@@ -633,13 +645,19 @@ router.post('/finance/invoices', async (req, res) => {
     // ── Resolve student info ──
     let studentName = null, studentRefId = null, studentEmail = null, studentMobile = null, studentCountry = null;
     const resolvedIsManual = isManualStudent ? 1 : 0;
+    const selectedCountryNames = Array.isArray(selectedCountries)
+      ? selectedCountries.map(c => c.country_name).filter(Boolean)
+      : [];
+    const invoiceCountriesLabel = selectedCountryNames.length > 0
+      ? selectedCountryNames.join(', ')
+      : null;
 
     if (isManualStudent) {
       // Manual entry — store provided details
       studentName    = manualStudentName?.trim() || null;
       studentEmail   = manualStudentEmail?.trim() || null;
       studentMobile  = manualStudentMobile?.trim() || null;
-      studentCountry = manualStudentCountry?.trim() || null;
+      studentCountry = invoiceCountriesLabel || manualStudentCountry?.trim() || null;
     } else if (studentId && invoiceType !== 'Agent Commission') {
       const [students] = await connection.query(
         'SELECT name, middle_name, surname, student_id, email, mobile, country FROM users WHERE id = ?',
@@ -651,17 +669,12 @@ router.post('/finance/invoices', async (req, res) => {
         studentRefId   = s.student_id;
         studentEmail   = s.email;
         studentMobile  = s.mobile;
-        studentCountry = s.country;
+        studentCountry = invoiceCountriesLabel || s.country;
       }
     }
 
-    // ── Visa ──
+    // ── Visa (legacy — no longer required for new student invoices) ──
     let visaRefId = null, visaType = null, visaCountry = null;
-    if (visaId) {
-      const [visas] = await connection.query('SELECT visa_id, visa_type FROM visas WHERE id = ?', [visaId]);
-      if (visas.length > 0) { visaRefId = visas[0].visa_id; visaType = visas[0].visa_type; }
-      if (studentCountry) visaCountry = studentCountry;
-    }
 
     // ── Amount calculation ──
     const extrasTotal      = Array.isArray(extraServices)
@@ -721,8 +734,8 @@ router.post('/finance/invoices', async (req, res) => {
         isManualStudent ? (manualStudentName?.trim() || null) : null,
         isManualStudent ? (manualStudentEmail?.trim() || null) : null,
         isManualStudent ? (manualStudentMobile?.trim() || null) : null,
-        isManualStudent ? (manualStudentCountry?.trim() || null) : null,
-        visaId || null, visaRefId, visaType, visaCountry,
+        isManualStudent ? (invoiceCountriesLabel || manualStudentCountry?.trim() || null) : null,
+        null, visaRefId, visaType, visaCountry,
         uniName, uniRef,
         agentId || null, commissionPercent || null,
         invoiceType === 'Agent Commission' ? agentCommissionAmount : null,
@@ -752,10 +765,17 @@ router.post('/finance/invoices', async (req, res) => {
     // ── Country services ──
     if (Array.isArray(selectedCountryServices) && selectedCountryServices.length > 0) {
       for (const cs of selectedCountryServices) {
-        await connection.query(
-          'INSERT INTO invoice_country_services (invoice_id, country_service_id, service_name) VALUES (?, ?, ?)',
-          [newInvoiceId, cs.id, cs.service_name]
-        );
+        try {
+          await connection.query(
+            'INSERT INTO invoice_country_services (invoice_id, country_service_id, service_name, country_id, country_name) VALUES (?, ?, ?, ?, ?)',
+            [newInvoiceId, cs.id, cs.service_name, cs.country_id || null, cs.country_name || null]
+          );
+        } catch {
+          await connection.query(
+            'INSERT INTO invoice_country_services (invoice_id, country_service_id, service_name) VALUES (?, ?, ?)',
+            [newInvoiceId, cs.id, cs.service_name]
+          );
+        }
       }
     }
 
