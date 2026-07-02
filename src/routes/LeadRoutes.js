@@ -76,6 +76,45 @@ const serializeCountries = (countriesOfInterest) => {
   return JSON.stringify(countriesOfInterest);
 };
 
+const parseLeadCountries = (countriesOfInterest) => {
+  if (!countriesOfInterest) return [];
+  try {
+    const parsed = typeof countriesOfInterest === 'string'
+      ? JSON.parse(countriesOfInterest)
+      : countriesOfInterest;
+    return Array.isArray(parsed) ? parsed.map(c => String(c).trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+};
+
+const invoiceStatusToLeadStatus = (invoiceStatus) => {
+  if (invoiceStatus === 'Paid') return 'Paid';
+  if (invoiceStatus === 'Partially Paid') return 'Partially Paid';
+  return 'Unpaid';
+};
+
+const getInvoiceCountries = async (db, invoiceId, studentCountry) => {
+  const [rows] = await db.query(
+    `SELECT DISTINCT country_name FROM invoice_country_services
+     WHERE invoice_id = ? AND country_name IS NOT NULL AND TRIM(country_name) != ''`,
+    [invoiceId]
+  );
+  if (rows.length > 0) {
+    return rows.map(r => r.country_name.trim());
+  }
+  if (studentCountry) {
+    return studentCountry.split(',').map(c => c.trim()).filter(Boolean);
+  }
+  return [];
+};
+
+const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
+  if (leadCountries.length === 0) return true;
+  const invoiceSet = new Set(invoiceCountries.map(c => c.toLowerCase()));
+  return leadCountries.every(c => invoiceSet.has(c.toLowerCase()));
+};
+
 // ─── DB Migration Note ────────────────────────────────────────────────────────
 // Run the following ALTER statements once against your MySQL database if you
 // haven't already added these columns:
@@ -89,7 +128,8 @@ const serializeCountries = (countriesOfInterest) => {
 //     ADD COLUMN IF NOT EXISTS counsellor_notes TEXT      NULL,
 //     ADD COLUMN IF NOT EXISTS referred_by  VARCHAR(255)  NULL,
 //     ADD COLUMN IF NOT EXISTS countries_other VARCHAR(255) NULL,
-//     ADD COLUMN IF NOT EXISTS admission_tests TEXT       NULL;
+//     ADD COLUMN IF NOT EXISTS admission_tests TEXT       NULL,
+//     ADD COLUMN IF NOT EXISTS invoice_id INT NULL;
 //
 // For the users table, ensure the following columns exist:
 //   middle_name, surname, alternative_email, landline, postal_code,
@@ -685,6 +725,191 @@ router.put('/leads/:leadId', async (req, res) => {
   }
 });
 
+// ─── Lead invoices (match by email + country validation) ─────────────────────
+router.get('/leads/:leadId/invoices', async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const [leads] = await pool.query('SELECT * FROM leads WHERE id = ?', [leadId]);
+    if (leads.length === 0) {
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    const lead = leads[0];
+    const leadEmail = (lead.email || '').trim().toLowerCase();
+    if (!leadEmail) {
+      return res.status(400).json({ success: false, message: 'Lead email is required to match invoices' });
+    }
+
+    const leadCountries = parseLeadCountries(lead.countries_of_interest);
+
+    const [invoices] = await pool.query(
+      `SELECT i.id, i.invoice_id, i.invoice_type, i.invoice_date, i.due_date,
+              i.student_name, i.student_email, i.manual_student_name, i.manual_student_email,
+              i.student_country, i.final_amount, i.payment_status, i.paid_amount, i.payment_date,
+              i.is_manual_student, i.created_at
+       FROM invoices i
+       WHERE i.invoice_type = 'Student'
+         AND (
+           LOWER(TRIM(i.student_email)) = ?
+           OR LOWER(TRIM(i.manual_student_email)) = ?
+         )
+       ORDER BY i.created_at DESC`,
+      [leadEmail, leadEmail]
+    );
+
+    const enriched = [];
+    for (const inv of invoices) {
+      const invoiceCountries = await getInvoiceCountries(pool, inv.id, inv.student_country);
+      const countriesMatch = leadCountriesMatchInvoice(leadCountries, invoiceCountries);
+
+      const [linkedUser] = await pool.query(
+        'SELECT id FROM users WHERE invoice_id = ? LIMIT 1',
+        [inv.id]
+      );
+      const [linkedLead] = await pool.query(
+        'SELECT id FROM leads WHERE invoice_id = ? AND id != ? LIMIT 1',
+        [inv.id, leadId]
+      );
+
+      enriched.push({
+        ...inv,
+        invoice_countries: invoiceCountries,
+        countries_match: countriesMatch,
+        is_linked_to_lead: lead.invoice_id === inv.id,
+        is_linked_to_student: linkedUser.length > 0,
+        is_linked_to_other_lead: linkedLead.length > 0
+      });
+    }
+
+    let linkedInvoice = null;
+    if (lead.invoice_id) {
+      linkedInvoice = enriched.find(i => i.id === lead.invoice_id) || null;
+      if (!linkedInvoice) {
+        const [rows] = await pool.query(
+          `SELECT id, invoice_id, invoice_type, invoice_date, final_amount,
+                  payment_status, paid_amount, payment_date, student_country
+           FROM invoices WHERE id = ?`,
+          [lead.invoice_id]
+        );
+        if (rows.length > 0) {
+          const invoiceCountries = await getInvoiceCountries(pool, rows[0].id, rows[0].student_country);
+          linkedInvoice = {
+            ...rows[0],
+            invoice_countries: invoiceCountries,
+            countries_match: leadCountriesMatchInvoice(leadCountries, invoiceCountries),
+            is_linked_to_lead: true
+          };
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      leadCountries,
+      paymentStatus: lead.payment_status || 'Unpaid',
+      linkedInvoiceId: lead.invoice_id || null,
+      linkedInvoice,
+      invoices: enriched
+    });
+  } catch (error) {
+    console.error('Error fetching lead invoices:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch invoices for lead' });
+  }
+});
+
+// ─── Link invoice + sync lead payment status ─────────────────────────────────
+router.put('/leads/:leadId/payment', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { leadId } = req.params;
+    const { invoiceId } = req.body;
+
+    if (!invoiceId) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Invoice is required' });
+    }
+
+    const [leads] = await connection.query('SELECT * FROM leads WHERE id = ?', [leadId]);
+    if (leads.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+    const lead = leads[0];
+
+    const [invoices] = await connection.query(
+      `SELECT * FROM invoices WHERE id = ? AND invoice_type = 'Student'`,
+      [invoiceId]
+    );
+    if (invoices.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Student invoice not found' });
+    }
+    const invoice = invoices[0];
+
+    const leadEmail = (lead.email || '').trim().toLowerCase();
+    const invoiceEmails = [
+      (invoice.student_email || '').trim().toLowerCase(),
+      (invoice.manual_student_email || '').trim().toLowerCase()
+    ].filter(Boolean);
+    if (!invoiceEmails.includes(leadEmail)) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Invoice email does not match this lead' });
+    }
+
+    const leadCountries = parseLeadCountries(lead.countries_of_interest);
+    const invoiceCountries = await getInvoiceCountries(connection, invoice.id, invoice.student_country);
+    if (!leadCountriesMatchInvoice(leadCountries, invoiceCountries)) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Countries do not match with the lead',
+        leadCountries,
+        invoiceCountries
+      });
+    }
+
+    const [linkedUser] = await connection.query(
+      'SELECT id FROM users WHERE invoice_id = ? LIMIT 1',
+      [invoiceId]
+    );
+    if (linkedUser.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: 'This invoice is already linked to a student profile' });
+    }
+
+    const [linkedOtherLead] = await connection.query(
+      'SELECT id FROM leads WHERE invoice_id = ? AND id != ? LIMIT 1',
+      [invoiceId, leadId]
+    );
+    if (linkedOtherLead.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: 'This invoice is already linked to another lead' });
+    }
+
+    const leadPaymentStatus = invoiceStatusToLeadStatus(invoice.payment_status);
+
+    await connection.query(
+      'UPDATE leads SET invoice_id = ?, payment_status = ? WHERE id = ?',
+      [invoiceId, leadPaymentStatus, leadId]
+    );
+
+    await connection.commit();
+    res.json({
+      success: true,
+      message: 'Payment status updated',
+      paymentStatus: leadPaymentStatus,
+      invoice
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating lead payment:', error);
+    res.status(500).json({ success: false, message: 'Failed to update lead payment status' });
+  } finally {
+    connection.release();
+  }
+});
+
 // ─── Register lead as student ─────────────────────────────────────────────────
 // Accepts `applicantInfo`, `paymentStatus`, and optionally `invoiceId`.
 // If invoiceId is provided, it is linked to the newly created user record.
@@ -696,18 +921,25 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { leadId } = req.params;
-    const { applicantInfo = {}, paymentStatus = 'Unpaid', invoiceId = null } = req.body;
+    const { applicantInfo = {} } = req.body;
 
-    // ── Payment gate ──────────────────────────────────────────────────────────
-    if (paymentStatus !== 'Paid') {
+    const [leads] = await connection.query('SELECT * FROM leads WHERE id = ?', [leadId]);
+    if (leads.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+    const lead = leads[0];
+
+    const leadPaymentStatus = lead.payment_status || 'Unpaid';
+    if (!['Paid', 'Partially Paid'].includes(leadPaymentStatus)) {
       await connection.rollback();
       return res.status(400).json({
         success: false,
-        message: 'Payment must be completed (Paid) before registering the student.'
+        message: 'Payment must be Partially Paid or Paid before registering the student.'
       });
     }
 
-    // ── Validate required applicant fields ────────────────────────────────────
+    const invoiceId = lead.invoice_id || null;
     const {
       name, middle_name, surname,
       nationality, marital_status, gender,
@@ -740,42 +972,28 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Date of birth is required.' });
     }
 
-    // ── Validate invoiceId if provided ────────────────────────────────────────
+    if (lead.is_registered) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'This lead is already registered as a student' });
+    }
+
     if (invoiceId) {
-      // Check invoice exists and is a Student type
       const [invCheck] = await connection.query(
-        `SELECT id, invoice_type FROM invoices WHERE id = ?`,
+        'SELECT id, invoice_type FROM invoices WHERE id = ?',
         [invoiceId]
       );
       if (invCheck.length === 0) {
         await connection.rollback();
-        return res.status(404).json({ success: false, message: 'Selected invoice not found.' });
+        return res.status(404).json({ success: false, message: 'Linked invoice not found.' });
       }
-      if (invCheck[0].invoice_type !== 'Student') {
-        await connection.rollback();
-        return res.status(400).json({ success: false, message: 'Only Student-type invoices can be linked to a student profile.' });
-      }
-      // Check it's not already linked to another student
       const [alreadyLinked] = await connection.query(
-        `SELECT id FROM users WHERE invoice_id = ?`,
+        'SELECT id FROM users WHERE invoice_id = ?',
         [invoiceId]
       );
       if (alreadyLinked.length > 0) {
         await connection.rollback();
         return res.status(409).json({ success: false, message: 'This invoice is already linked to another student.' });
       }
-    }
-
-    // ── Fetch the lead ────────────────────────────────────────────────────────
-    const [leads] = await connection.query('SELECT * FROM leads WHERE id = ?', [leadId]);
-    if (leads.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Lead not found' });
-    }
-    const lead = leads[0];
-    if (lead.is_registered) {
-      await connection.rollback();
-      return res.status(400).json({ success: false, message: 'This lead is already registered as a student' });
     }
 
     // Use applicantInfo.email if provided, else fall back to lead email
@@ -848,8 +1066,8 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         passport_place_of_issue?.trim() || null,
         course?.trim() || null,
         source_inquiry || null,
-        'Paid',             // payment_status
-        invoiceId || null,  // invoice_id — links to selected invoice
+        leadPaymentStatus,
+        invoiceId || null,
         hashedPassword,
         studentStatus || 'Active',
       ]
@@ -877,7 +1095,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     // ── Mark lead as registered and store payment status ──────────────────────
     await connection.query(
       'UPDATE leads SET is_registered = TRUE, registered_at = NOW(), payment_status = ? WHERE id = ?',
-      ['Paid', leadId]
+      [leadPaymentStatus, leadId]
     );
 
     await connection.commit();

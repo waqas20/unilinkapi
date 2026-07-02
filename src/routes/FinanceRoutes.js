@@ -884,6 +884,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
 
     const safeFloat = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
     const resolvedShowConverted = showConvertedCurrency === false || showConvertedCurrency === 0 ? 0 : 1;
+    const resolvedPaymentStatus = paymentStatus || 'Pending';
 
     await connection.query(
       `UPDATE invoices SET
@@ -905,7 +906,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         notes=?
        WHERE id=?`,
       [
-        paymentStatus || 'Pending',
+        resolvedPaymentStatus,
         safeFloat(paidAmount) ?? 0,
         paymentDate || null,
         safeFloat(bankAccountId),
@@ -926,6 +927,16 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         invoiceId
       ]
     );
+
+    const leadPaymentStatus = resolvedPaymentStatus === 'Paid'
+      ? 'Paid'
+      : resolvedPaymentStatus === 'Partially Paid'
+        ? 'Partially Paid'
+        : 'Unpaid';
+    await connection.query(
+      'UPDATE leads SET payment_status = ? WHERE invoice_id = ?',
+      [leadPaymentStatus, invoiceId]
+    ).catch(() => {});
 
     await connection.commit();
     res.json({ success: true, message: 'Invoice updated successfully' });
