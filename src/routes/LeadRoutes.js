@@ -88,25 +88,44 @@ const parseLeadCountries = (countriesOfInterest) => {
   }
 };
 
+const resolveLeadCountries = (countriesOfInterest, countriesOther) => {
+  const other = (countriesOther || '').trim();
+  return parseLeadCountries(countriesOfInterest)
+    .map(c => (c.toLowerCase() === 'other' ? (other || null) : c))
+    .filter(Boolean);
+};
+
 const invoiceStatusToLeadStatus = (invoiceStatus) => {
   if (invoiceStatus === 'Paid') return 'Paid';
   if (invoiceStatus === 'Partially Paid') return 'Partially Paid';
   return 'Unpaid';
 };
 
-const getInvoiceCountries = async (db, invoiceId, studentCountry) => {
+const parseCountryLabels = (value) => {
+  if (!value) return [];
+  return String(value).split(',').map(c => c.trim()).filter(Boolean);
+};
+
+const getInvoiceCountries = async (db, invoiceId, studentCountry, manualStudentCountry) => {
+  const countries = new Map();
+  const addCountry = (name) => {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (!countries.has(key)) countries.set(key, trimmed);
+  };
+
+  parseCountryLabels(studentCountry).forEach(addCountry);
+  parseCountryLabels(manualStudentCountry).forEach(addCountry);
+
   const [rows] = await db.query(
     `SELECT DISTINCT country_name FROM invoice_country_services
      WHERE invoice_id = ? AND country_name IS NOT NULL AND TRIM(country_name) != ''`,
     [invoiceId]
   );
-  if (rows.length > 0) {
-    return rows.map(r => r.country_name.trim());
-  }
-  if (studentCountry) {
-    return studentCountry.split(',').map(c => c.trim()).filter(Boolean);
-  }
-  return [];
+  rows.forEach(r => addCountry(r.country_name));
+
+  return Array.from(countries.values());
 };
 
 const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
@@ -740,12 +759,12 @@ router.get('/leads/:leadId/invoices', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Lead email is required to match invoices' });
     }
 
-    const leadCountries = parseLeadCountries(lead.countries_of_interest);
+    const leadCountries = resolveLeadCountries(lead.countries_of_interest, lead.countries_other);
 
     const [invoices] = await pool.query(
       `SELECT i.id, i.invoice_id, i.invoice_type, i.invoice_date, i.due_date,
               i.student_name, i.student_email, i.manual_student_name, i.manual_student_email,
-              i.student_country, i.final_amount, i.payment_status, i.paid_amount, i.payment_date,
+              i.student_country, i.manual_student_country, i.final_amount, i.payment_status, i.paid_amount, i.payment_date,
               i.is_manual_student, i.created_at
        FROM invoices i
        WHERE i.invoice_type = 'Student'
@@ -759,7 +778,9 @@ router.get('/leads/:leadId/invoices', async (req, res) => {
 
     const enriched = [];
     for (const inv of invoices) {
-      const invoiceCountries = await getInvoiceCountries(pool, inv.id, inv.student_country);
+      const invoiceCountries = await getInvoiceCountries(
+        pool, inv.id, inv.student_country, inv.manual_student_country
+      );
       const countriesMatch = leadCountriesMatchInvoice(leadCountries, invoiceCountries);
 
       const [linkedUser] = await pool.query(
@@ -787,12 +808,14 @@ router.get('/leads/:leadId/invoices', async (req, res) => {
       if (!linkedInvoice) {
         const [rows] = await pool.query(
           `SELECT id, invoice_id, invoice_type, invoice_date, final_amount,
-                  payment_status, paid_amount, payment_date, student_country
+                  payment_status, paid_amount, payment_date, student_country, manual_student_country
            FROM invoices WHERE id = ?`,
           [lead.invoice_id]
         );
         if (rows.length > 0) {
-          const invoiceCountries = await getInvoiceCountries(pool, rows[0].id, rows[0].student_country);
+          const invoiceCountries = await getInvoiceCountries(
+            pool, rows[0].id, rows[0].student_country, rows[0].manual_student_country
+          );
           linkedInvoice = {
             ...rows[0],
             invoice_countries: invoiceCountries,
@@ -857,8 +880,10 @@ router.put('/leads/:leadId/payment', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invoice email does not match this lead' });
     }
 
-    const leadCountries = parseLeadCountries(lead.countries_of_interest);
-    const invoiceCountries = await getInvoiceCountries(connection, invoice.id, invoice.student_country);
+    const leadCountries = resolveLeadCountries(lead.countries_of_interest, lead.countries_other);
+    const invoiceCountries = await getInvoiceCountries(
+      connection, invoice.id, invoice.student_country, invoice.manual_student_country
+    );
     if (!leadCountriesMatchInvoice(leadCountries, invoiceCountries)) {
       await connection.rollback();
       return res.status(400).json({
