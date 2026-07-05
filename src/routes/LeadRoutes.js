@@ -169,6 +169,11 @@ router.get('/leads/migrate-invoice', async (req, res) => {
       ADD COLUMN IF NOT EXISTS invoice_id INT NULL
     `).catch(() => {});
 
+    await connection.query(`
+      ALTER TABLE users
+      MODIFY COLUMN dob DATE NULL
+    `).catch(() => {});
+
     // Also add a foreign key if not already there (best-effort)
     await connection.query(`
       ALTER TABLE users
@@ -176,7 +181,7 @@ router.get('/leads/migrate-invoice', async (req, res) => {
         FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE SET NULL
     `).catch(() => {}); // Ignore if FK already exists or invoices table differs
 
-    res.json({ success: true, message: 'Migration applied: users.invoice_id column ready.' });
+    res.json({ success: true, message: 'Migration applied: users.invoice_id column ready and users.dob is nullable.' });
   } catch (error) {
     console.error('Migration error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -965,6 +970,22 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     }
 
     const invoiceId = lead.invoice_id || null;
+
+    const nameParts = (lead.full_name || '').trim().split(/\s+/).filter(Boolean);
+    const leadDefaults = {
+      name: nameParts[0] || '',
+      middle_name: nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '',
+      surname: nameParts.length > 1 ? nameParts[nameParts.length - 1] : '',
+      email: lead.email || '',
+      mobile: lead.phone || '',
+      address: lead.address || '',
+      course: lead.course || '',
+      source_inquiry: lead.interest || '',
+      status: 'Active',
+    };
+
+    const mergedInfo = { ...leadDefaults, ...applicantInfo };
+
     const {
       name, middle_name, surname,
       nationality, marital_status, gender,
@@ -974,7 +995,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       email, alternative_email,
       course, source_inquiry,
       status: studentStatus,
-    } = applicantInfo;
+    } = mergedInfo;
 
     if (!name || !name.trim()) {
       await connection.rollback();
@@ -991,10 +1012,6 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     if (!address || !address.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Address is required.' });
-    }
-    if (!dob) {
-      await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Date of birth is required.' });
     }
 
     if (lead.is_registered) {
@@ -1048,7 +1065,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
     // ── Format dates ──────────────────────────────────────────────────────────
-    const formattedDob = dob.split('T')[0];
+    const formattedDob = dob ? dob.split('T')[0] : null;
     const formattedPassportDate = passport_issue_date
       ? passport_issue_date.split('T')[0]
       : null;
