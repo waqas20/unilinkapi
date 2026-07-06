@@ -215,6 +215,103 @@ router.get('/students/:studentId', async (req, res) => {
   }
 });
 
+router.get('/students/:studentId/lead-history', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    const [users] = await pool.query(
+      'SELECT id, source_lead_id, email, invoice_id FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const user = users[0];
+    let leadId = user.source_lead_id;
+
+    if (!leadId) {
+      const [counselorLinks] = await pool.query(
+        `SELECT transferred_from_lead_id
+         FROM student_counselors
+         WHERE user_id = ? AND transferred_from_lead_id IS NOT NULL
+         LIMIT 1`,
+        [studentId]
+      );
+      leadId = counselorLinks[0]?.transferred_from_lead_id || null;
+    }
+
+    if (!leadId && user.invoice_id) {
+      const [invoiceLeads] = await pool.query(
+        'SELECT id FROM leads WHERE invoice_id = ? LIMIT 1',
+        [user.invoice_id]
+      );
+      leadId = invoiceLeads[0]?.id || null;
+    }
+
+    if (!leadId) {
+      const [emailLeads] = await pool.query(
+        `SELECT id FROM leads
+         WHERE LOWER(email) = LOWER(?) AND is_registered = TRUE
+         ORDER BY registered_at DESC LIMIT 1`,
+        [user.email]
+      );
+      leadId = emailLeads[0]?.id || null;
+    }
+
+    if (!leadId) {
+      return res.json({
+        success: true,
+        hasHistory: false,
+        lead: null,
+        followUps: [],
+        changes: [],
+      });
+    }
+
+    const [leadRows] = await pool.query('SELECT * FROM leads WHERE id = ?', [leadId]);
+    if (leadRows.length === 0) {
+      return res.json({
+        success: true,
+        hasHistory: false,
+        lead: null,
+        followUps: [],
+        changes: [],
+      });
+    }
+
+    const [followUps] = await pool.query(
+      `SELECT fu.*, l.purpose_of_visit
+       FROM follow_ups fu
+       LEFT JOIN leads l ON fu.lead_id = l.id
+       WHERE fu.lead_id = ?
+       ORDER BY fu.followed_up_at DESC`,
+      [leadId]
+    );
+
+    const [changes] = await pool.query(
+      `SELECT lc.*, fu.follow_up_number, fu.followed_up_at
+       FROM lead_changes lc
+       LEFT JOIN follow_ups fu ON lc.follow_up_id = fu.id
+       WHERE lc.lead_id = ?
+       ORDER BY lc.changed_at DESC`,
+      [leadId]
+    );
+
+    res.json({
+      success: true,
+      hasHistory: true,
+      lead: leadRows[0],
+      followUps,
+      changes,
+      leadId,
+    });
+  } catch (error) {
+    console.error('Error fetching student lead history:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch lead history' });
+  }
+});
+
 // Create new student
 router.post('/students', async (req, res) => {
   const connection = await pool.getConnection();

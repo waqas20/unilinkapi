@@ -60,6 +60,91 @@ const generatePassword = (length = 12) => {
   return password;
 };
 
+const getRegistrationFilter = (view = 'active') => {
+  if (view === 'registered') return 'l.is_registered = TRUE';
+  if (view === 'all') return '1=1';
+  return '(l.is_registered = FALSE OR l.is_registered IS NULL)';
+};
+
+const resolveLeadIdForStudent = async (connection, studentId, userRow = null) => {
+  const db = connection || pool;
+  let user = userRow;
+
+  if (!user) {
+    const [users] = await db.query(
+      'SELECT id, source_lead_id, email, invoice_id FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    if (users.length === 0) return null;
+    user = users[0];
+  }
+
+  if (user.source_lead_id) return user.source_lead_id;
+
+  const [counselorLinks] = await db.query(
+    `SELECT transferred_from_lead_id
+     FROM student_counselors
+     WHERE user_id = ? AND transferred_from_lead_id IS NOT NULL
+     LIMIT 1`,
+    [studentId]
+  );
+  if (counselorLinks.length > 0) return counselorLinks[0].transferred_from_lead_id;
+
+  if (user.invoice_id) {
+    const [invoiceLeads] = await db.query(
+      'SELECT id FROM leads WHERE invoice_id = ? LIMIT 1',
+      [user.invoice_id]
+    );
+    if (invoiceLeads.length > 0) return invoiceLeads[0].id;
+  }
+
+  const [emailLeads] = await db.query(
+    `SELECT id FROM leads
+     WHERE LOWER(email) = LOWER(?) AND is_registered = TRUE
+     ORDER BY registered_at DESC LIMIT 1`,
+    [user.email]
+  );
+  return emailLeads.length > 0 ? emailLeads[0].id : null;
+};
+
+const fetchLeadHistoryById = async (leadId) => {
+  const [lead] = await pool.query('SELECT * FROM leads WHERE id = ?', [leadId]);
+  if (lead.length === 0) return null;
+
+  const [followUps] = await pool.query(
+    `SELECT fu.*, l.purpose_of_visit
+     FROM follow_ups fu
+     LEFT JOIN leads l ON fu.lead_id = l.id
+     WHERE fu.lead_id = ?
+     ORDER BY fu.followed_up_at DESC`,
+    [leadId]
+  );
+
+  const [changes] = await pool.query(
+    `SELECT lc.*, fu.follow_up_number, fu.followed_up_at
+     FROM lead_changes lc
+     LEFT JOIN follow_ups fu ON lc.follow_up_id = fu.id
+     WHERE lc.lead_id = ?
+     ORDER BY lc.changed_at DESC`,
+    [leadId]
+  );
+
+  const [studentLinks] = await pool.query(
+    `SELECT id, student_id FROM users
+     WHERE source_lead_id = ? AND role = 'client'
+     ORDER BY id DESC LIMIT 1`,
+    [leadId]
+  );
+
+  return {
+    lead: lead[0],
+    followUps,
+    changes,
+    studentUserId: studentLinks[0]?.id || null,
+    studentCode: studentLinks[0]?.student_id || null,
+  };
+};
+
 const serializeQualifications = (qualifications) => {
   if (!Array.isArray(qualifications) || qualifications.length === 0) return null;
   const filtered = qualifications.filter(q => q.qualification?.trim() || q.subject?.trim() || q.grade?.trim());
@@ -174,6 +259,30 @@ router.get('/leads/migrate-invoice', async (req, res) => {
       MODIFY COLUMN dob DATE NULL
     `).catch(() => {});
 
+    await connection.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS source_lead_id INT NULL
+    `).catch(() => {});
+
+    await connection.query(`
+      UPDATE users u
+      INNER JOIN (
+        SELECT user_id, MIN(transferred_from_lead_id) AS lead_id
+        FROM student_counselors
+        WHERE transferred_from_lead_id IS NOT NULL
+        GROUP BY user_id
+      ) sc ON sc.user_id = u.id
+      SET u.source_lead_id = sc.lead_id
+      WHERE u.source_lead_id IS NULL AND u.role = 'client'
+    `).catch(() => {});
+
+    await connection.query(`
+      UPDATE users u
+      INNER JOIN leads l ON LOWER(l.email) = LOWER(u.email) AND l.is_registered = TRUE
+      SET u.source_lead_id = l.id
+      WHERE u.source_lead_id IS NULL AND u.role = 'client'
+    `).catch(() => {});
+
     // Also add a foreign key if not already there (best-effort)
     await connection.query(`
       ALTER TABLE users
@@ -181,7 +290,7 @@ router.get('/leads/migrate-invoice', async (req, res) => {
         FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE SET NULL
     `).catch(() => {}); // Ignore if FK already exists or invoices table differs
 
-    res.json({ success: true, message: 'Migration applied: users.invoice_id column ready and users.dob is nullable.' });
+    res.json({ success: true, message: 'Migration applied: users.invoice_id, source_lead_id, and nullable dob are ready.' });
   } catch (error) {
     console.error('Migration error:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -585,61 +694,95 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
 router.get('/leads/:leadId/history', async (req, res) => {
   try {
     const { leadId } = req.params;
-    const [lead] = await pool.query('SELECT * FROM leads WHERE id = ?', [leadId]);
-    if (lead.length === 0) return res.status(404).json({ success: false, message: 'Lead not found' });
-    const [followUps] = await pool.query(
-      `SELECT fu.*, l.purpose_of_visit
-       FROM follow_ups fu
-       LEFT JOIN leads l ON fu.lead_id = l.id
-       WHERE fu.lead_id = ? ORDER BY fu.followed_up_at DESC`,
-      [leadId]
-    );
-    const [changes] = await pool.query(
-      `SELECT lc.*, fu.follow_up_number, fu.followed_up_at
-       FROM lead_changes lc
-       LEFT JOIN follow_ups fu ON lc.follow_up_id = fu.id
-       WHERE lc.lead_id = ? ORDER BY lc.changed_at DESC`,
-      [leadId]
-    );
-    res.json({ success: true, lead: lead[0], followUps, changes });
+    const history = await fetchLeadHistoryById(leadId);
+    if (!history) return res.status(404).json({ success: false, message: 'Lead not found' });
+    res.json({ success: true, ...history });
   } catch (error) {
     console.error('Error fetching lead history:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch lead history' });
   }
 });
 
-// Get all leads that have follow-ups — excludes registered students
+// Get all leads that have follow-ups
 router.get('/leads/followups', async (req, res) => {
   try {
+    const view = req.query.view || 'active';
+    const registrationFilter = getRegistrationFilter(view);
+    const orderBy = view === 'registered'
+      ? 'l.registered_at DESC'
+      : 'last_follow_up DESC';
+
     const [followups] = await pool.query(
-      `SELECT l.*, COUNT(DISTINCT fu.id) as follow_up_count, MAX(fu.followed_up_at) as last_follow_up
+      `SELECT l.*,
+              COUNT(DISTINCT fu.id) as follow_up_count,
+              MAX(fu.followed_up_at) as last_follow_up,
+              u.id as student_user_id,
+              u.student_id as student_code
        FROM leads l
        INNER JOIN follow_ups fu ON l.id = fu.lead_id
-       WHERE l.is_registered = FALSE OR l.is_registered IS NULL
-       GROUP BY l.id HAVING follow_up_count > 0 ORDER BY last_follow_up DESC`
+       LEFT JOIN users u ON u.source_lead_id = l.id AND u.role = 'client'
+       WHERE ${registrationFilter}
+       GROUP BY l.id
+       HAVING follow_up_count > 0
+       ORDER BY ${orderBy}`
     );
-    res.json({ success: true, followups, total: followups.length });
+
+    const [registeredCountRows] = await pool.query(
+      `SELECT COUNT(DISTINCT l.id) as total
+       FROM leads l
+       INNER JOIN follow_ups fu ON l.id = fu.lead_id
+       WHERE l.is_registered = TRUE`
+    );
+
+    res.json({
+      success: true,
+      followups,
+      total: followups.length,
+      view,
+      registeredCount: registeredCountRows[0]?.total || 0,
+    });
   } catch (error) {
     console.error('Error fetching follow-ups:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch follow-ups' });
   }
 });
 
-// Get all leads — excludes registered students
+// Get all leads
 router.get('/leads', async (req, res) => {
   try {
+    const view = req.query.view || 'active';
+    const registrationFilter = getRegistrationFilter(view);
+    const orderBy = view === 'registered'
+      ? 'l.registered_at DESC'
+      : 'l.created_at DESC';
+
     const [leads] = await pool.query(
-      `SELECT l.*, 
+      `SELECT l.*,
               COUNT(DISTINCT fu.id) as follow_up_count,
               MAX(fu.followed_up_at) as last_follow_up,
-              COUNT(DISTINCT lca.counselor_id) as counselor_count
+              COUNT(DISTINCT lca.counselor_id) as counselor_count,
+              u.id as student_user_id,
+              u.student_id as student_code
        FROM leads l
        LEFT JOIN follow_ups fu ON l.id = fu.lead_id
        LEFT JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
-       WHERE l.is_registered = FALSE OR l.is_registered IS NULL
-       GROUP BY l.id ORDER BY l.created_at DESC`
+       LEFT JOIN users u ON u.source_lead_id = l.id AND u.role = 'client'
+       WHERE ${registrationFilter}
+       GROUP BY l.id
+       ORDER BY ${orderBy}`
     );
-    res.json({ success: true, leads, total: leads.length });
+
+    const [registeredCountRows] = await pool.query(
+      'SELECT COUNT(*) as total FROM leads WHERE is_registered = TRUE'
+    );
+
+    res.json({
+      success: true,
+      leads,
+      total: leads.length,
+      view,
+      registeredCount: registeredCountRows[0]?.total || 0,
+    });
   } catch (error) {
     console.error('Error fetching leads:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch leads' });
@@ -651,9 +794,16 @@ router.get('/leads/:leadId', async (req, res) => {
   try {
     const { leadId } = req.params;
     const [leads] = await pool.query(
-      `SELECT l.*, COUNT(DISTINCT fu.id) as follow_up_count, MAX(fu.followed_up_at) as last_follow_up
-       FROM leads l LEFT JOIN follow_ups fu ON l.id = fu.lead_id
-       WHERE l.id = ? GROUP BY l.id`,
+      `SELECT l.*,
+              COUNT(DISTINCT fu.id) as follow_up_count,
+              MAX(fu.followed_up_at) as last_follow_up,
+              u.id as student_user_id,
+              u.student_id as student_code
+       FROM leads l
+       LEFT JOIN follow_ups fu ON l.id = fu.lead_id
+       LEFT JOIN users u ON u.source_lead_id = l.id AND u.role = 'client'
+       WHERE l.id = ?
+       GROUP BY l.id`,
       [leadId]
     );
     if (leads.length === 0) return res.status(404).json({ success: false, message: 'Lead not found' });
@@ -1084,8 +1234,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           course, source_inquiry,
           payment_status,
           invoice_id,
+          source_lead_id,
           password, plain_password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId,
         name.trim(),
@@ -1110,6 +1261,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         source_inquiry || null,
         leadPaymentStatus,
         invoiceId || null,
+        leadId,
         hashedPassword,
         generatedPassword,
         studentStatus || 'Active',
