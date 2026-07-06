@@ -66,6 +66,36 @@ const getRegistrationFilter = (view = 'active') => {
   return '(l.is_registered = FALSE OR l.is_registered IS NULL)';
 };
 
+const STUDENT_USER_ID_SQL = `(
+  SELECT u.id FROM users u
+  WHERE u.role = 'client'
+    AND (
+      u.source_lead_id = l.id
+      OR (
+        u.source_lead_id IS NULL
+        AND LOWER(u.email) = LOWER(l.email)
+        AND l.is_registered = TRUE
+      )
+    )
+  ORDER BY u.id DESC
+  LIMIT 1
+)`;
+
+const STUDENT_CODE_SQL = `(
+  SELECT u.student_id FROM users u
+  WHERE u.role = 'client'
+    AND (
+      u.source_lead_id = l.id
+      OR (
+        u.source_lead_id IS NULL
+        AND LOWER(u.email) = LOWER(l.email)
+        AND l.is_registered = TRUE
+      )
+    )
+  ORDER BY u.id DESC
+  LIMIT 1
+)`;
+
 const resolveLeadIdForStudent = async (connection, studentId, userRow = null) => {
   const db = connection || pool;
   let user = userRow;
@@ -673,11 +703,10 @@ router.get('/leads/followups', async (req, res) => {
       `SELECT l.*,
               COUNT(DISTINCT fu.id) as follow_up_count,
               MAX(fu.followed_up_at) as last_follow_up,
-              u.id as student_user_id,
-              u.student_id as student_code
+              ${STUDENT_USER_ID_SQL} as student_user_id,
+              ${STUDENT_CODE_SQL} as student_code
        FROM leads l
        INNER JOIN follow_ups fu ON l.id = fu.lead_id
-       LEFT JOIN users u ON u.source_lead_id = l.id AND u.role = 'client'
        WHERE ${registrationFilter}
        GROUP BY l.id
        HAVING follow_up_count > 0
@@ -718,12 +747,11 @@ router.get('/leads', async (req, res) => {
               COUNT(DISTINCT fu.id) as follow_up_count,
               MAX(fu.followed_up_at) as last_follow_up,
               COUNT(DISTINCT lca.counselor_id) as counselor_count,
-              u.id as student_user_id,
-              u.student_id as student_code
+              ${STUDENT_USER_ID_SQL} as student_user_id,
+              ${STUDENT_CODE_SQL} as student_code
        FROM leads l
        LEFT JOIN follow_ups fu ON l.id = fu.lead_id
        LEFT JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
-       LEFT JOIN users u ON u.source_lead_id = l.id AND u.role = 'client'
        WHERE ${registrationFilter}
        GROUP BY l.id
        ORDER BY ${orderBy}`
@@ -754,11 +782,10 @@ router.get('/leads/:leadId', async (req, res) => {
       `SELECT l.*,
               COUNT(DISTINCT fu.id) as follow_up_count,
               MAX(fu.followed_up_at) as last_follow_up,
-              u.id as student_user_id,
-              u.student_id as student_code
+              ${STUDENT_USER_ID_SQL} as student_user_id,
+              ${STUDENT_CODE_SQL} as student_code
        FROM leads l
        LEFT JOIN follow_ups fu ON l.id = fu.lead_id
-       LEFT JOIN users u ON u.source_lead_id = l.id AND u.role = 'client'
        WHERE l.id = ?
        GROUP BY l.id`,
       [leadId]
