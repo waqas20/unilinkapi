@@ -4,7 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import pool from '../config/db.js';
+import pool, { ensureSchemaMigrations } from '../config/db.js';
 
 const router = express.Router();
 
@@ -247,55 +247,12 @@ const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
 
 // ─── Migrate: add invoice_id to users table ───────────────────────────────────
 router.get('/leads/migrate-invoice', async (req, res) => {
-  const connection = await pool.getConnection();
   try {
-    await connection.query(`
-      ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS invoice_id INT NULL
-    `).catch(() => {});
-
-    await connection.query(`
-      ALTER TABLE users
-      MODIFY COLUMN dob DATE NULL
-    `).catch(() => {});
-
-    await connection.query(`
-      ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS source_lead_id INT NULL
-    `).catch(() => {});
-
-    await connection.query(`
-      UPDATE users u
-      INNER JOIN (
-        SELECT user_id, MIN(transferred_from_lead_id) AS lead_id
-        FROM student_counselors
-        WHERE transferred_from_lead_id IS NOT NULL
-        GROUP BY user_id
-      ) sc ON sc.user_id = u.id
-      SET u.source_lead_id = sc.lead_id
-      WHERE u.source_lead_id IS NULL AND u.role = 'client'
-    `).catch(() => {});
-
-    await connection.query(`
-      UPDATE users u
-      INNER JOIN leads l ON LOWER(l.email) = LOWER(u.email) AND l.is_registered = TRUE
-      SET u.source_lead_id = l.id
-      WHERE u.source_lead_id IS NULL AND u.role = 'client'
-    `).catch(() => {});
-
-    // Also add a foreign key if not already there (best-effort)
-    await connection.query(`
-      ALTER TABLE users
-      ADD CONSTRAINT fk_users_invoice
-        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE SET NULL
-    `).catch(() => {}); // Ignore if FK already exists or invoices table differs
-
+    await ensureSchemaMigrations();
     res.json({ success: true, message: 'Migration applied: users.invoice_id, source_lead_id, and nullable dob are ready.' });
   } catch (error) {
     console.error('Migration error:', error);
     res.status(500).json({ success: false, message: error.message });
-  } finally {
-    connection.release();
   }
 });
 
