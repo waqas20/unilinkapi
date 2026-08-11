@@ -177,7 +177,15 @@ const fetchLeadHistoryById = async (leadId) => {
 
 const serializeQualifications = (qualifications) => {
   if (!Array.isArray(qualifications) || qualifications.length === 0) return null;
-  const filtered = qualifications.filter(q => q.qualification?.trim() || q.subject?.trim() || q.grade?.trim());
+  const filtered = qualifications.filter(q =>
+    q.level?.trim() ||
+    q.qualification?.trim() ||
+    q.percentage?.trim() ||
+    q.cgpaDivision?.trim() ||
+    q.subject?.trim() ||
+    q.grade?.trim() ||
+    (Array.isArray(q.subjects) && q.subjects.some(s => s.subject?.trim() || s.grade?.trim()))
+  );
   return filtered.length > 0 ? JSON.stringify(filtered) : null;
 };
 
