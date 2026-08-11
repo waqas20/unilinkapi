@@ -325,7 +325,7 @@ router.post('/students', async (req, res) => {
       cityOfBirth, countryOfBirth,
       passportNo, passportIssueDate, passportPlaceOfIssue,
       guardianName, guardianRelation, guardianMobile, guardianEmail,
-      sourceInquiry, course,
+      sourceInquiry, course, status,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards
     } = req.body;
@@ -359,6 +359,8 @@ router.post('/students', async (req, res) => {
     const generatedPassword = generatePassword(12);
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
+    const studentStatus = status || 'Active';
+
     const [result] = await connection.query(
       `INSERT INTO users 
       (student_id, name, middle_name, surname, email, alternative_email, mobile, landline,
@@ -366,7 +368,7 @@ router.post('/students', async (req, res) => {
        city_of_birth, country_of_birth, passport_no, passport_issue_date, passport_place_of_issue,
        guardian_name, guardian_relation, guardian_mobile, guardian_email,
        source_inquiry, course, password, plain_password, role, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', 'Active')`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId, firstName.trim(), middleName?.trim() || null, surname.trim(),
         trimmedEmail, alternativeEmail?.trim() || null,
@@ -382,7 +384,8 @@ router.post('/students', async (req, res) => {
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, course?.trim() || null,
         hashedPassword,
-        generatedPassword
+        generatedPassword,
+        studentStatus
       ]
     );
 
