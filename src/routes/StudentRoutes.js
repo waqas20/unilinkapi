@@ -51,6 +51,19 @@ const validatePhone = (phone) => {
   return phoneRegex.test(phone) && phone.replace(/\D/g, '').length >= 10;
 };
 
+const serializePassportNo = (passportNo) => {
+  if (Array.isArray(passportNo)) {
+    const cleaned = passportNo.map(p => String(p || '').trim()).filter(Boolean);
+    if (!cleaned.length) return null;
+    return cleaned.length === 1 ? cleaned[0] : JSON.stringify(cleaned);
+  }
+  if (typeof passportNo === 'string') {
+    const trimmed = passportNo.trim();
+    return trimmed || null;
+  }
+  return null;
+};
+
 const generateStudentId = async (connection) => {
   const currentYear = new Date().getFullYear();
   const [result] = await connection.query(
@@ -377,7 +390,7 @@ router.post('/students', async (req, res) => {
         country, dob,
         nationality?.trim() || null, maritalStatus || null, gender || null,
         cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
-        passportNo?.trim() || null,
+        serializePassportNo(passportNo),
         passportIssueDate || null,
         passportPlaceOfIssue?.trim() || null,
         guardianName?.trim() || null, guardianRelation?.trim() || null,
@@ -555,7 +568,7 @@ router.put('/students/:studentId', async (req, res) => {
         country, formattedDob,
         nationality?.trim() || null, maritalStatus || null, gender || null,
         cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
-        passportNo?.trim() || null,
+        serializePassportNo(passportNo),
         passportIssueDate ? passportIssueDate.split('T')[0] : null,
         passportPlaceOfIssue?.trim() || null,
         guardianName?.trim() || null, guardianRelation?.trim() || null,
