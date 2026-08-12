@@ -286,6 +286,7 @@ const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
 //     ADD COLUMN IF NOT EXISTS countries_other VARCHAR(255) NULL,
 //     ADD COLUMN IF NOT EXISTS admission_tests TEXT       NULL,
 //     ADD COLUMN IF NOT EXISTS invoice_id INT NULL;
+//     ADD COLUMN IF NOT EXISTS institute_name VARCHAR(255) NULL;
 //
 //   ALTER TABLE follow_ups
 //     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT NULL;
@@ -373,7 +374,7 @@ router.post('/leads', async (req, res) => {
     
     const {
       fullName, email, phone, address,
-      interest, program,
+      interest, program, instituteName,
       countriesOfInterest, countriesOther,
       qualifications, referredBy, counsellorNotes, admissionTests
     } = req.body;
@@ -425,20 +426,39 @@ router.post('/leads', async (req, res) => {
     const qualificationsJson = serializeQualifications(qualifications);
     const admissionTestsJson = serializeAdmissionTests(admissionTests);
     
-    const [result] = await connection.query(
-      `INSERT INTO leads
-         (full_name, email, phone, address, interest, program,
-          countries_of_interest, countries_other, qualifications,
-          referred_by, counsellor_notes, admission_tests, is_follow_up, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
-      [
-        trimmedName, trimmedEmail, trimmedPhone, address.trim(),
-        interest.trim(), program?.trim() || null,
-        countriesJson, countriesOther?.trim() || null, qualificationsJson,
-        referredBy?.trim() || null, counsellorNotes?.trim() || null,
-        admissionTestsJson
-      ]
-    );
+    let result;
+    try {
+      [result] = await connection.query(
+        `INSERT INTO leads
+           (full_name, email, phone, address, interest, program, institute_name,
+            countries_of_interest, countries_other, qualifications,
+            referred_by, counsellor_notes, admission_tests, is_follow_up, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
+        [
+          trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+          interest.trim(), program?.trim() || null, instituteName?.trim() || null,
+          countriesJson, countriesOther?.trim() || null, qualificationsJson,
+          referredBy?.trim() || null, counsellorNotes?.trim() || null,
+          admissionTestsJson
+        ]
+      );
+    } catch (insertErr) {
+      if (insertErr.code !== 'ER_BAD_FIELD_ERROR') throw insertErr;
+      [result] = await connection.query(
+        `INSERT INTO leads
+           (full_name, email, phone, address, interest, program,
+            countries_of_interest, countries_other, qualifications,
+            referred_by, counsellor_notes, admission_tests, is_follow_up, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
+        [
+          trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+          interest.trim(), program?.trim() || null,
+          countriesJson, countriesOther?.trim() || null, qualificationsJson,
+          referredBy?.trim() || null, counsellorNotes?.trim() || null,
+          admissionTestsJson
+        ]
+      );
+    }
     
     await connection.commit();
     
@@ -503,18 +523,35 @@ router.post('/leads/lookup', async (req, res) => {
       queryParams.push(normalizedPhone);
     }
     
-    const [leads] = await pool.query(
-      `SELECT id, full_name, email, phone, address, interest, program, comments,
-              countries_of_interest, countries_other, grades, qualification, qualifications,
-              referred_by, counsellor_notes, admission_tests,
-              (SELECT COUNT(*) FROM follow_ups WHERE lead_id = leads.id) as follow_up_count,
-              created_at, updated_at
-       FROM leads 
-       WHERE ${whereClause}
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      queryParams
-    );
+    let leads;
+    try {
+      [leads] = await pool.query(
+        `SELECT id, full_name, email, phone, address, interest, program, institute_name, comments,
+                countries_of_interest, countries_other, grades, qualification, qualifications,
+                referred_by, counsellor_notes, admission_tests,
+                (SELECT COUNT(*) FROM follow_ups WHERE lead_id = leads.id) as follow_up_count,
+                created_at, updated_at
+         FROM leads 
+         WHERE ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        queryParams
+      );
+    } catch (lookupErr) {
+      if (lookupErr.code !== 'ER_BAD_FIELD_ERROR') throw lookupErr;
+      [leads] = await pool.query(
+        `SELECT id, full_name, email, phone, address, interest, program, comments,
+                countries_of_interest, countries_other, grades, qualification, qualifications,
+                referred_by, counsellor_notes, admission_tests,
+                (SELECT COUNT(*) FROM follow_ups WHERE lead_id = leads.id) as follow_up_count,
+                created_at, updated_at
+         FROM leads 
+         WHERE ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        queryParams
+      );
+    }
     
     if (leads.length === 0) {
       return res.status(404).json({ 
@@ -550,7 +587,7 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     const { leadId } = req.params;
     const {
       fullName, email, phone, address,
-      interest, program,
+      interest, program, instituteName,
       countriesOfInterest, countriesOther,
       qualifications, referredBy, counsellorNotes, admissionTests,
       purposeOfVisit
@@ -649,6 +686,7 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       address: 'address',
       interest: 'interest',
       program: 'program',
+      instituteName: 'institute_name',
       counsellorNotes: 'counsellor_notes',
       countriesOfInterest: 'countries_of_interest',
       countriesOther: 'countries_other',
@@ -664,6 +702,7 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       address: address.trim(),
       interest: interest.trim(),
       program: program?.trim() || null,
+      instituteName: instituteName?.trim() || null,
       counsellorNotes: counsellorNotes?.trim() || null,
       countriesOfInterest: countriesJson,
       countriesOther: countriesOther?.trim() || null,
@@ -689,23 +728,44 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       );
     }
     
-    await connection.query(
-      `UPDATE leads 
-       SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
-           countries_of_interest = ?, countries_other = ?, qualifications = ?,
-           referred_by = ?, counsellor_notes = ?, admission_tests = ?,
-           purpose_of_visit = ?, is_follow_up = TRUE
-       WHERE id = ?`,
-      [
-        trimmedName, trimmedEmail, trimmedPhone, address.trim(),
-        interest.trim(), program?.trim() || null,
-        countriesJson, countriesOther?.trim() || null, qualificationsJson,
-        referredBy?.trim() || null, counsellorNotes?.trim() || null,
-        admissionTestsJson,
-        purposeOfVisit?.trim() || oldData.purpose_of_visit || null,
-        leadId
-      ]
-    );
+    try {
+      await connection.query(
+        `UPDATE leads 
+         SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?, institute_name = ?,
+             countries_of_interest = ?, countries_other = ?, qualifications = ?,
+             referred_by = ?, counsellor_notes = ?, admission_tests = ?,
+             purpose_of_visit = ?, is_follow_up = TRUE
+         WHERE id = ?`,
+        [
+          trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+          interest.trim(), program?.trim() || null, instituteName?.trim() || null,
+          countriesJson, countriesOther?.trim() || null, qualificationsJson,
+          referredBy?.trim() || null, counsellorNotes?.trim() || null,
+          admissionTestsJson,
+          purposeOfVisit?.trim() || oldData.purpose_of_visit || null,
+          leadId
+        ]
+      );
+    } catch (updateErr) {
+      if (updateErr.code !== 'ER_BAD_FIELD_ERROR') throw updateErr;
+      await connection.query(
+        `UPDATE leads 
+         SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
+             countries_of_interest = ?, countries_other = ?, qualifications = ?,
+             referred_by = ?, counsellor_notes = ?, admission_tests = ?,
+             purpose_of_visit = ?, is_follow_up = TRUE
+         WHERE id = ?`,
+        [
+          trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+          interest.trim(), program?.trim() || null,
+          countriesJson, countriesOther?.trim() || null, qualificationsJson,
+          referredBy?.trim() || null, counsellorNotes?.trim() || null,
+          admissionTestsJson,
+          purposeOfVisit?.trim() || oldData.purpose_of_visit || null,
+          leadId
+        ]
+      );
+    }
     
     await connection.commit();
     
@@ -879,7 +939,7 @@ router.put('/leads/:leadId', async (req, res) => {
     const { leadId } = req.params;
     const {
       fullName, email, phone, address,
-      interest, program, comments, counsellorNotes,
+      interest, program, instituteName, comments, counsellorNotes,
       status, countriesOfInterest, countriesOther,
       grades, qualification, qualifications,
       referredBy, admissionTests
@@ -925,22 +985,42 @@ router.put('/leads/:leadId', async (req, res) => {
     const notesValue = counsellorNotes?.trim() || comments?.trim() || null;
     const admissionTestsJson = serializeAdmissionTests(admissionTests);
     
-    await connection.query(
-      `UPDATE leads 
-       SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
-           counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
-           qualifications = ?, referred_by = ?, admission_tests = ?
-       WHERE id = ?`,
-      [
-        trimmedName, trimmedEmail, trimmedPhone, address.trim(),
-        interest.trim(), program?.trim() || null,
-        notesValue, status || 'New',
-        countriesJson, countriesOther?.trim() || null,
-        qualificationsJson, referredBy?.trim() || null,
-        admissionTestsJson,
-        leadId
-      ]
-    );
+    try {
+      await connection.query(
+        `UPDATE leads 
+         SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?, institute_name = ?,
+             counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
+             qualifications = ?, referred_by = ?, admission_tests = ?
+         WHERE id = ?`,
+        [
+          trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+          interest.trim(), program?.trim() || null, instituteName?.trim() || null,
+          notesValue, status || 'New',
+          countriesJson, countriesOther?.trim() || null,
+          qualificationsJson, referredBy?.trim() || null,
+          admissionTestsJson,
+          leadId
+        ]
+      );
+    } catch (updateErr) {
+      if (updateErr.code !== 'ER_BAD_FIELD_ERROR') throw updateErr;
+      await connection.query(
+        `UPDATE leads 
+         SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?,
+             counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
+             qualifications = ?, referred_by = ?, admission_tests = ?
+         WHERE id = ?`,
+        [
+          trimmedName, trimmedEmail, trimmedPhone, address.trim(),
+          interest.trim(), program?.trim() || null,
+          notesValue, status || 'New',
+          countriesJson, countriesOther?.trim() || null,
+          qualificationsJson, referredBy?.trim() || null,
+          admissionTestsJson,
+          leadId
+        ]
+      );
+    }
     
     await connection.commit();
     res.json({ success: true, message: 'Lead updated successfully' });
