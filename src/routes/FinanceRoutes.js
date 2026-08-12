@@ -115,6 +115,29 @@ router.get('/finance/migrate', async (req, res) => {
       ADD COLUMN IF NOT EXISTS student_country VARCHAR(100) NULL
     `).catch(() => {});
 
+    // Payment installment history
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS invoice_payments (
+        id           INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id   INT NOT NULL,
+        amount       DECIMAL(15,2) NOT NULL DEFAULT 0,
+        payment_date DATE NOT NULL,
+        notes        TEXT NULL,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_invoice_payments_invoice (invoice_id),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+      )
+    `).catch(() => {});
+
+    // Backfill one history row for invoices that already have a paid total
+    await connection.query(`
+      INSERT INTO invoice_payments (invoice_id, amount, payment_date, notes)
+      SELECT i.id, i.paid_amount, COALESCE(i.payment_date, i.invoice_date, CURDATE()), 'Migrated existing payment'
+      FROM invoices i
+      LEFT JOIN invoice_payments p ON p.invoice_id = i.id
+      WHERE i.paid_amount IS NOT NULL AND i.paid_amount > 0 AND p.id IS NULL
+    `).catch(() => {});
+
     res.json({ success: true, message: 'Migration applied successfully' });
   } catch (error) {
     console.error('Migration error:', error);
@@ -123,6 +146,74 @@ router.get('/finance/migrate', async (req, res) => {
     connection.release();
   }
 });
+
+// ============================================================
+// HELPERS — invoice payment history
+// ============================================================
+const syncLeadPaymentStatus = async (connection, invoiceId, paymentStatus) => {
+  const leadPaymentStatus = paymentStatus === 'Paid'
+    ? 'Paid'
+    : paymentStatus === 'Partially Paid'
+      ? 'Partially Paid'
+      : 'Unpaid';
+  await connection.query(
+    'UPDATE leads SET payment_status = ? WHERE invoice_id = ?',
+    [leadPaymentStatus, invoiceId]
+  ).catch(() => {});
+};
+
+const recomputeInvoicePaymentTotals = async (connection, invoiceId, statusOverride = null) => {
+  const [invRows] = await connection.query(
+    'SELECT final_amount FROM invoices WHERE id = ?',
+    [invoiceId]
+  );
+  if (invRows.length === 0) return null;
+
+  const [sumRows] = await connection.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total_paid, MAX(payment_date) AS last_payment_date
+     FROM invoice_payments WHERE invoice_id = ?`,
+    [invoiceId]
+  );
+
+  const totalPaid = parseFloat(sumRows[0]?.total_paid) || 0;
+  const lastDate = sumRows[0]?.last_payment_date || null;
+  const finalAmount = parseFloat(invRows[0].final_amount) || 0;
+
+  let paymentStatus;
+  if (statusOverride === 'Cancelled') {
+    paymentStatus = 'Cancelled';
+  } else if (totalPaid <= 0) {
+    paymentStatus = 'Pending';
+  } else if (totalPaid + 0.001 >= finalAmount) {
+    paymentStatus = 'Paid';
+  } else {
+    paymentStatus = 'Partially Paid';
+  }
+
+  await connection.query(
+    `UPDATE invoices SET paid_amount = ?, payment_date = ?, payment_status = ? WHERE id = ?`,
+    [totalPaid, lastDate, paymentStatus, invoiceId]
+  );
+  await syncLeadPaymentStatus(connection, invoiceId, paymentStatus);
+
+  return { totalPaid, lastDate, paymentStatus };
+};
+
+const fetchInvoicePayments = async (db, invoiceId) => {
+  try {
+    const [payments] = await db.query(
+      `SELECT id, invoice_id, amount, payment_date, notes, created_at
+       FROM invoice_payments
+       WHERE invoice_id = ?
+       ORDER BY payment_date ASC, id ASC`,
+      [invoiceId]
+    );
+    return payments;
+  } catch (err) {
+    if (err.code === 'ER_NO_SUCH_TABLE') return [];
+    throw err;
+  }
+};
 
 // ============================================================
 // BANK ACCOUNTS
@@ -522,6 +613,8 @@ router.get('/finance/invoices', async (req, res) => {
         const [commStudents] = await pool.query('SELECT * FROM invoice_commission_students WHERE invoice_id = ?', [inv.id]).catch(() => [[]]);
         inv.commission_students = commStudents;
       }
+      inv.payments = await fetchInvoicePayments(pool, inv.id);
+      inv.payment_count = inv.payments.length;
     }
 
     res.json({ success: true, invoices, total: invoices.length });
@@ -577,6 +670,8 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
       }
     }
 
+    const payments = await fetchInvoicePayments(pool, invoiceId);
+
     res.json({
       success: true,
       invoice: invoices[0],
@@ -584,11 +679,104 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
       countryServices,
       agentStudents,
       commissionStudents,
-      defaultServices
+      defaultServices,
+      payments
     });
   } catch (error) {
     console.error('Error fetching invoice:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch invoice' });
+  }
+});
+
+// ============================================================
+// INVOICES — RECORD PAYMENT (installment)
+// ============================================================
+
+router.post('/finance/invoices/:invoiceId/payments', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { invoiceId } = req.params;
+    const { amount, paymentDate, notes, paymentStatus } = req.body;
+
+    const [existing] = await connection.query(
+      'SELECT id, final_amount, paid_amount FROM invoices WHERE id = ?',
+      [invoiceId]
+    );
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const paymentAmount = parseFloat(amount);
+    if (!isFinite(paymentAmount) || paymentAmount <= 0) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Payment amount must be greater than 0' });
+    }
+
+    if (!paymentDate) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Payment date is required' });
+    }
+
+    // Ensure table exists (safe for first use before migrate)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS invoice_payments (
+        id           INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id   INT NOT NULL,
+        amount       DECIMAL(15,2) NOT NULL DEFAULT 0,
+        payment_date DATE NOT NULL,
+        notes        TEXT NULL,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_invoice_payments_invoice (invoice_id),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+      )
+    `).catch(() => {});
+
+    const [insertResult] = await connection.query(
+      `INSERT INTO invoice_payments (invoice_id, amount, payment_date, notes)
+       VALUES (?, ?, ?, ?)`,
+      [invoiceId, paymentAmount, paymentDate, notes?.trim() || null]
+    );
+
+    const totals = await recomputeInvoicePaymentTotals(
+      connection,
+      invoiceId,
+      paymentStatus === 'Cancelled' ? 'Cancelled' : null
+    );
+
+    const payments = await fetchInvoicePayments(connection, invoiceId);
+    await connection.commit();
+
+    res.status(201).json({
+      success: true,
+      message: 'Payment recorded successfully',
+      paymentId: insertResult.insertId,
+      paymentStatus: totals?.paymentStatus,
+      paidAmount: totals?.totalPaid,
+      payments
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error recording payment:', error);
+    res.status(500).json({ success: false, message: 'Failed to record payment' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.get('/finance/invoices/:invoiceId/payments', async (req, res) => {
+  try {
+    const { invoiceId } = req.params;
+    const [existing] = await pool.query('SELECT id FROM invoices WHERE id = ?', [invoiceId]);
+    if (existing.length === 0) {
+      return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+    const payments = await fetchInvoicePayments(pool, invoiceId);
+    res.json({ success: true, payments });
+  } catch (error) {
+    console.error('Error fetching payments:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch payments' });
   }
 });
 
@@ -868,7 +1056,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
     await connection.beginTransaction();
     const { invoiceId } = req.params;
     const {
-      paymentStatus, paidAmount, paymentDate,
+      paymentStatus, paidAmount, paymentDate, installmentAmount,
       bankAccountId, baseAmount, discount, gstPercent, gstAmount, finalAmount,
       invoiceDate, dueDate, universityName, commissionReference,
       agentId, agentCommissionPercent, agentCommissionAmount,
@@ -876,7 +1064,10 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       showConvertedCurrency,
     } = req.body;
 
-    const [existing] = await connection.query('SELECT id FROM invoices WHERE id = ?', [invoiceId]);
+    const [existing] = await connection.query(
+      'SELECT id, paid_amount, final_amount FROM invoices WHERE id = ?',
+      [invoiceId]
+    );
     if (existing.length === 0) {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Invoice not found' });
@@ -884,11 +1075,63 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
 
     const safeFloat = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
     const resolvedShowConverted = showConvertedCurrency === false || showConvertedCurrency === 0 ? 0 : 1;
-    const resolvedPaymentStatus = paymentStatus || 'Pending';
 
+    // Ensure payments table exists
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS invoice_payments (
+        id           INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id   INT NOT NULL,
+        amount       DECIMAL(15,2) NOT NULL DEFAULT 0,
+        payment_date DATE NOT NULL,
+        notes        TEXT NULL,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_invoice_payments_invoice (invoice_id),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+      )
+    `).catch(() => {});
+
+    // Record a new installment when provided (preferred path)
+    const installment = safeFloat(installmentAmount);
+    if (installment && installment > 0) {
+      if (!paymentDate) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: 'Payment date is required for a new installment' });
+      }
+      await connection.query(
+        `INSERT INTO invoice_payments (invoice_id, amount, payment_date, notes)
+         VALUES (?, ?, ?, ?)`,
+        [invoiceId, installment, paymentDate, null]
+      );
+    } else if (paidAmount !== undefined && paidAmount !== null && paidAmount !== '') {
+      // Legacy: client sent cumulative paidAmount — seed history or store only the delta
+      const existingPayments = await fetchInvoicePayments(connection, invoiceId);
+      const historyTotal = existingPayments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+      const newTotal = safeFloat(paidAmount) ?? 0;
+      const payDate = paymentDate || new Date().toISOString().slice(0, 10);
+
+      if (existingPayments.length === 0) {
+        if (newTotal > 0) {
+          await connection.query(
+            `INSERT INTO invoice_payments (invoice_id, amount, payment_date, notes)
+             VALUES (?, ?, ?, ?)`,
+            [invoiceId, newTotal, payDate, null]
+          );
+        }
+      } else {
+        const delta = Math.round((newTotal - historyTotal) * 100) / 100;
+        if (delta > 0) {
+          await connection.query(
+            `INSERT INTO invoice_payments (invoice_id, amount, payment_date, notes)
+             VALUES (?, ?, ?, ?)`,
+            [invoiceId, delta, payDate, 'Payment update']
+          );
+        }
+      }
+    }
+
+    // Update non-payment invoice fields first (payment totals recomputed below)
     await connection.query(
       `UPDATE invoices SET
-        payment_status=?, paid_amount=?, payment_date=?,
         bank_account_id=COALESCE(?,bank_account_id),
         base_amount=COALESCE(?,base_amount),
         discount=COALESCE(?,discount),
@@ -906,9 +1149,6 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         notes=?
        WHERE id=?`,
       [
-        resolvedPaymentStatus,
-        safeFloat(paidAmount) ?? 0,
-        paymentDate || null,
         safeFloat(bankAccountId),
         safeFloat(baseAmount),
         safeFloat(discount),
@@ -928,18 +1168,33 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       ]
     );
 
-    const leadPaymentStatus = resolvedPaymentStatus === 'Paid'
-      ? 'Paid'
-      : resolvedPaymentStatus === 'Partially Paid'
-        ? 'Partially Paid'
-        : 'Unpaid';
-    await connection.query(
-      'UPDATE leads SET payment_status = ? WHERE invoice_id = ?',
-      [leadPaymentStatus, invoiceId]
-    ).catch(() => {});
+    const payments = await fetchInvoicePayments(connection, invoiceId);
+    let resolvedStatus;
+
+    if (payments.length > 0 || installment || (paidAmount !== undefined && paidAmount !== null && paidAmount !== '')) {
+      const totals = await recomputeInvoicePaymentTotals(
+        connection,
+        invoiceId,
+        paymentStatus === 'Cancelled' ? 'Cancelled' : null
+      );
+      resolvedStatus = totals?.paymentStatus;
+    } else if (paymentStatus) {
+      // Status-only update (e.g. Cancelled / Pending) with no payment history
+      resolvedStatus = paymentStatus;
+      await connection.query(
+        `UPDATE invoices SET payment_status = ?, paid_amount = COALESCE(?, paid_amount), payment_date = COALESCE(?, payment_date) WHERE id = ?`,
+        [resolvedStatus, safeFloat(paidAmount), paymentDate || null, invoiceId]
+      );
+      await syncLeadPaymentStatus(connection, invoiceId, resolvedStatus);
+    }
 
     await connection.commit();
-    res.json({ success: true, message: 'Invoice updated successfully' });
+    res.json({
+      success: true,
+      message: 'Invoice updated successfully',
+      paymentStatus: resolvedStatus,
+      payments: await fetchInvoicePayments(pool, invoiceId)
+    });
   } catch (error) {
     await connection.rollback();
     console.error('Error updating invoice:', error);
