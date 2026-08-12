@@ -141,14 +141,28 @@ const fetchLeadHistoryById = async (leadId) => {
   const [lead] = await pool.query('SELECT * FROM leads WHERE id = ?', [leadId]);
   if (lead.length === 0) return null;
 
-  const [followUps] = await pool.query(
-    `SELECT fu.*, l.purpose_of_visit
-     FROM follow_ups fu
-     LEFT JOIN leads l ON fu.lead_id = l.id
-     WHERE fu.lead_id = ?
-     ORDER BY fu.followed_up_at DESC`,
-    [leadId]
-  );
+  let followUps;
+  try {
+    [followUps] = await pool.query(
+      `SELECT fu.id, fu.lead_id, fu.follow_up_number, fu.notes, fu.followed_up_at,
+              COALESCE(fu.purpose_of_visit, l.purpose_of_visit) as purpose_of_visit
+       FROM follow_ups fu
+       LEFT JOIN leads l ON fu.lead_id = l.id
+       WHERE fu.lead_id = ?
+       ORDER BY fu.followed_up_at DESC`,
+      [leadId]
+    );
+  } catch (err) {
+    if (err.code !== 'ER_BAD_FIELD_ERROR') throw err;
+    [followUps] = await pool.query(
+      `SELECT fu.*, l.purpose_of_visit
+       FROM follow_ups fu
+       LEFT JOIN leads l ON fu.lead_id = l.id
+       WHERE fu.lead_id = ?
+       ORDER BY fu.followed_up_at DESC`,
+      [leadId]
+    );
+  }
 
   const [changes] = await pool.query(
     `SELECT lc.*, fu.follow_up_number, fu.followed_up_at
@@ -272,6 +286,9 @@ const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
 //     ADD COLUMN IF NOT EXISTS countries_other VARCHAR(255) NULL,
 //     ADD COLUMN IF NOT EXISTS admission_tests TEXT       NULL,
 //     ADD COLUMN IF NOT EXISTS invoice_id INT NULL;
+//
+//   ALTER TABLE follow_ups
+//     ADD COLUMN IF NOT EXISTS purpose_of_visit TEXT NULL;
 //
 // For the users table, ensure the following columns exist:
 //   middle_name, surname, alternative_email, landline, postal_code,
@@ -595,10 +612,28 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     
     const nextFollowUpNumber = followUpCount[0].count + 1;
     
-    const [followUpResult] = await connection.query(
-      'INSERT INTO follow_ups (lead_id, follow_up_number, notes) VALUES (?, ?, ?)',
-      [leadId, nextFollowUpNumber, `Follow-up #${nextFollowUpNumber} - Updated information`]
-    );
+    let followUpResult;
+    try {
+      [followUpResult] = await connection.query(
+        'INSERT INTO follow_ups (lead_id, follow_up_number, notes, purpose_of_visit) VALUES (?, ?, ?, ?)',
+        [
+          leadId,
+          nextFollowUpNumber,
+          `Follow-up #${nextFollowUpNumber} - Updated information`,
+          purposeOfVisit?.trim() || null
+        ]
+      );
+    } catch (insertErr) {
+      // Fallback if purpose_of_visit column is not yet migrated
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR') {
+        [followUpResult] = await connection.query(
+          'INSERT INTO follow_ups (lead_id, follow_up_number, notes) VALUES (?, ?, ?)',
+          [leadId, nextFollowUpNumber, `Follow-up #${nextFollowUpNumber} - Updated information`]
+        );
+      } else {
+        throw insertErr;
+      }
+    }
     
     const followUpId = followUpResult.insertId;
 
@@ -698,28 +733,56 @@ router.get('/leads/:leadId/history', async (req, res) => {
   }
 });
 
-// Get all leads that have follow-ups
+// Get all follow-up entries (one row per follow-up visit)
 router.get('/leads/followups', async (req, res) => {
   try {
     const view = req.query.view || 'active';
     const registrationFilter = getRegistrationFilter(view);
-    const orderBy = view === 'registered'
-      ? 'l.registered_at DESC'
-      : 'last_follow_up DESC';
 
-    const [followups] = await pool.query(
-      `SELECT l.*,
-              COUNT(DISTINCT fu.id) as follow_up_count,
-              MAX(fu.followed_up_at) as last_follow_up,
-              ${STUDENT_USER_ID_SQL} as student_user_id,
-              ${STUDENT_CODE_SQL} as student_code
-       FROM leads l
-       INNER JOIN follow_ups fu ON l.id = fu.lead_id
-       WHERE ${registrationFilter}
-       GROUP BY l.id
-       HAVING follow_up_count > 0
-       ORDER BY ${orderBy}`
-    );
+    let followups;
+    try {
+      [followups] = await pool.query(
+        `SELECT fu.id as follow_up_id,
+                fu.follow_up_number,
+                fu.followed_up_at as last_follow_up,
+                fu.notes,
+                COALESCE(fu.purpose_of_visit, l.purpose_of_visit) as purpose_of_visit,
+                l.id,
+                l.full_name,
+                l.phone,
+                l.email,
+                l.is_registered,
+                l.registered_at,
+                ${STUDENT_USER_ID_SQL} as student_user_id,
+                ${STUDENT_CODE_SQL} as student_code
+         FROM follow_ups fu
+         INNER JOIN leads l ON l.id = fu.lead_id
+         WHERE ${registrationFilter}
+         ORDER BY fu.followed_up_at DESC`
+      );
+    } catch (queryErr) {
+      // Fallback if follow_ups.purpose_of_visit column is not yet migrated
+      if (queryErr.code !== 'ER_BAD_FIELD_ERROR') throw queryErr;
+      [followups] = await pool.query(
+        `SELECT fu.id as follow_up_id,
+                fu.follow_up_number,
+                fu.followed_up_at as last_follow_up,
+                fu.notes,
+                l.purpose_of_visit as purpose_of_visit,
+                l.id,
+                l.full_name,
+                l.phone,
+                l.email,
+                l.is_registered,
+                l.registered_at,
+                ${STUDENT_USER_ID_SQL} as student_user_id,
+                ${STUDENT_CODE_SQL} as student_code
+         FROM follow_ups fu
+         INNER JOIN leads l ON l.id = fu.lead_id
+         WHERE ${registrationFilter}
+         ORDER BY fu.followed_up_at DESC`
+      );
+    }
 
     const [registeredCountRows] = await pool.query(
       `SELECT COUNT(DISTINCT l.id) as total
