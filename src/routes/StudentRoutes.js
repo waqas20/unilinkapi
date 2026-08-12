@@ -41,6 +41,50 @@ const upload = multer({
   }
 });
 
+const profileStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, '../uploads/student-profiles');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'profile-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const profileUpload = multer({
+  storage: profileStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = /jpeg|jpg|png|webp|gif/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = /jpeg|jpg|png|webp|gif/.test(file.mimetype) || file.mimetype.startsWith('image/');
+    if (extname && mimetype) return cb(null, true);
+    cb(new Error('Only image files (JPG, PNG, WEBP, GIF) are allowed for profile pictures'));
+  }
+});
+
+const ensureProfilePictureColumn = async () => {
+  try {
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS profile_picture VARCHAR(500) NULL
+    `);
+  } catch (err) {
+    if (err.code === 'ER_DUP_FIELDNAME') return;
+    try {
+      await pool.query(`ALTER TABLE users ADD COLUMN profile_picture VARCHAR(500) NULL`);
+    } catch (err2) {
+      if (err2.code !== 'ER_DUP_FIELDNAME') {
+        console.warn('profile_picture column ensure:', err2.message);
+      }
+    }
+  }
+};
+
 const validateEmail = (email) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -825,6 +869,96 @@ router.delete('/students/:studentId/manual-form', async (req, res) => {
     await connection.rollback();
     console.error('Error deleting manual form:', error);
     res.status(500).json({ success: false, message: 'An error occurred while deleting the manual form' });
+  } finally {
+    connection.release();
+  }
+});
+
+// ============ PROFILE PICTURE ============
+
+router.post('/students/:studentId/profile-picture', profileUpload.single('profilePicture'), async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await ensureProfilePictureColumn();
+
+    const { studentId } = req.params;
+    if (!req.file) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Please select a profile picture' });
+    }
+
+    const [student] = await connection.query(
+      'SELECT id, profile_picture FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    if (student.length === 0) {
+      await connection.rollback();
+      const uploaded = path.join(__dirname, '../uploads/student-profiles', req.file.filename);
+      if (fs.existsSync(uploaded)) fs.unlinkSync(uploaded);
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const filePath = `/uploads/student-profiles/${req.file.filename}`;
+    const oldPath = student[0].profile_picture;
+
+    await connection.query(
+      'UPDATE users SET profile_picture = ? WHERE id = ?',
+      [filePath, studentId]
+    );
+
+    if (oldPath) {
+      const absoluteOld = path.join(__dirname, '..', oldPath);
+      if (fs.existsSync(absoluteOld)) {
+        try { fs.unlinkSync(absoluteOld); } catch { /* ignore */ }
+      }
+    }
+
+    await connection.commit();
+    res.json({
+      success: true,
+      message: 'Profile picture uploaded successfully',
+      profilePicture: filePath
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error uploading profile picture:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to upload profile picture' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.delete('/students/:studentId/profile-picture', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { studentId } = req.params;
+    const [student] = await connection.query(
+      'SELECT id, profile_picture FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
+    if (student.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const oldPath = student[0].profile_picture;
+    await connection.query('UPDATE users SET profile_picture = NULL WHERE id = ?', [studentId]);
+
+    if (oldPath) {
+      const absoluteOld = path.join(__dirname, '..', oldPath);
+      if (fs.existsSync(absoluteOld)) {
+        try { fs.unlinkSync(absoluteOld); } catch { /* ignore */ }
+      }
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'Profile picture removed' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting profile picture:', error);
+    res.status(500).json({ success: false, message: 'Failed to remove profile picture' });
   } finally {
     connection.release();
   }
