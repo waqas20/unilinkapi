@@ -255,6 +255,20 @@ const invoiceStatusToLeadStatus = (invoiceStatus) => {
   return 'Unpaid';
 };
 
+const LEAD_STATUS_ENUM = {
+  new: 'New',
+  contacted: 'Contacted',
+  in_progress: 'In Progress',
+  converted: 'Converted',
+  closed: 'Closed',
+};
+
+const toLeadStatusEnum = (value) => {
+  if (!value) return 'new';
+  const normalized = String(value).trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return LEAD_STATUS_ENUM[normalized] ? normalized : 'new';
+};
+
 const parseCountryLabels = (value) => {
   if (!value) return [];
   return String(value).split(',').map(c => c.trim()).filter(Boolean);
@@ -965,7 +979,7 @@ router.put('/leads/:leadId', async (req, res) => {
       interest, program, instituteName, comments, counsellorNotes,
       status, countriesOfInterest, countriesOther,
       grades, qualification, qualifications,
-      referredBy, admissionTests
+      referredBy, admissionTests, course
     } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
@@ -1007,18 +1021,20 @@ router.put('/leads/:leadId', async (req, res) => {
         : null);
     const notesValue = counsellorNotes?.trim() || comments?.trim() || null;
     const admissionTestsJson = serializeAdmissionTests(admissionTests);
+    const statusValue = toLeadStatusEnum(status);
+    const courseValue = course?.trim() || null;
     
     try {
       await connection.query(
         `UPDATE leads 
          SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?, institute_name = ?,
-             counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
+             counsellor_notes = ?, status = ?, course = ?, countries_of_interest = ?, countries_other = ?,
              qualifications = ?, referred_by = ?, admission_tests = ?
          WHERE id = ?`,
         [
           trimmedName, trimmedEmail, trimmedPhone, address.trim(),
           interest.trim(), program?.trim() || null, instituteName?.trim() || null,
-          notesValue, status || 'New',
+          notesValue, statusValue, courseValue,
           countriesJson, countriesOther?.trim() || null,
           qualificationsJson, referredBy?.trim() || null,
           admissionTestsJson,
@@ -1036,7 +1052,7 @@ router.put('/leads/:leadId', async (req, res) => {
         [
           trimmedName, trimmedEmail, trimmedPhone, address.trim(),
           interest.trim(), program?.trim() || null,
-          notesValue, status || 'New',
+          notesValue, statusValue,
           countriesJson, countriesOther?.trim() || null,
           qualificationsJson, referredBy?.trim() || null,
           admissionTestsJson,
