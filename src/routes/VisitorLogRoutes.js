@@ -19,7 +19,7 @@ const generateLogId = async (connection) => {
 // Get all visitor logs with stats
 router.get('/visitor-logs', async (req, res) => {
   try {
-    const { visitorType, status, searchQuery } = req.query;
+    const { visitorType, status, searchQuery, dateFrom, dateTo } = req.query;
     
     let query = 'SELECT * FROM visitor_logs WHERE 1=1';
     const params = [];
@@ -38,6 +38,16 @@ router.get('/visitor-logs', async (req, res) => {
       query += ' AND (visitor_name LIKE ? OR contact_no LIKE ? OR log_id LIKE ?)';
       const searchPattern = `%${searchQuery}%`;
       params.push(searchPattern, searchPattern, searchPattern);
+    }
+
+    if (dateFrom) {
+      query += ' AND DATE(visit_date) >= ?';
+      params.push(dateFrom);
+    }
+
+    if (dateTo) {
+      query += ' AND DATE(visit_date) <= ?';
+      params.push(dateTo);
     }
     
     query += ' ORDER BY visit_date DESC, time_in DESC';

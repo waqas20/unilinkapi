@@ -18,7 +18,7 @@ const generateEmployeeId = async (connection) => {
 // GET all employees
 router.get('/employees', async (req, res) => {
   try {
-    const { department, status, searchQuery } = req.query;
+    const { department, status, searchQuery, dateFrom, dateTo } = req.query;
 
     let query = 'SELECT * FROM employees WHERE 1=1';
     const params = [];
@@ -37,6 +37,16 @@ router.get('/employees', async (req, res) => {
       query += ' AND (name LIKE ? OR email LIKE ? OR phone LIKE ? OR employee_id LIKE ? OR designation LIKE ?)';
       const s = `%${searchQuery}%`;
       params.push(s, s, s, s, s);
+    }
+
+    if (dateFrom) {
+      query += ' AND DATE(joining_date) >= ?';
+      params.push(dateFrom);
+    }
+
+    if (dateTo) {
+      query += ' AND DATE(joining_date) <= ?';
+      params.push(dateTo);
     }
 
     query += ' ORDER BY created_at DESC';

@@ -580,14 +580,18 @@ router.get('/finance/statistics', async (req, res) => {
 
 router.get('/finance/invoices', async (req, res) => {
   try {
-    const { type, status, month, year, bankAccountId } = req.query;
+    const { type, status, month, year, bankAccountId, dateFrom, dateTo } = req.query;
     let whereClause = 'WHERE 1=1';
     const params = [];
 
     if (type)          { whereClause += ' AND i.invoice_type = ?';       params.push(type); }
     if (status)        { whereClause += ' AND i.payment_status = ?';      params.push(status); }
-    if (month)         { whereClause += ' AND MONTH(i.invoice_date) = ?'; params.push(month); }
-    if (year)          { whereClause += ' AND YEAR(i.invoice_date) = ?';  params.push(year); }
+    if (dateFrom)      { whereClause += ' AND DATE(i.invoice_date) >= ?'; params.push(dateFrom); }
+    if (dateTo)        { whereClause += ' AND DATE(i.invoice_date) <= ?'; params.push(dateTo); }
+    if (!dateFrom && !dateTo) {
+      if (month)         { whereClause += ' AND MONTH(i.invoice_date) = ?'; params.push(month); }
+      if (year)          { whereClause += ' AND YEAR(i.invoice_date) = ?';  params.push(year); }
+    }
     if (bankAccountId) { whereClause += ' AND i.bank_account_id = ?';     params.push(bankAccountId); }
 
     const [invoices] = await pool.query(
