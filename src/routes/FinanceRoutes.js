@@ -623,7 +623,7 @@ router.get('/finance/invoices', async (req, res) => {
     const [invoices] = await pool.query(
       `SELECT i.*,
               ba.account_name, ba.bank_name, ba.currency,
-              a.agent_name
+              a.agent_name, a.email as agent_email, a.phone as agent_phone
        FROM invoices i
        LEFT JOIN bank_accounts ba ON i.bank_account_id = ba.id
        LEFT JOIN agents a ON i.agent_id = a.id
@@ -664,7 +664,7 @@ router.get('/finance/invoices/:invoiceId', async (req, res) => {
 
     const [invoices] = await pool.query(
       `SELECT i.*, ba.account_name, ba.bank_name, ba.account_number, ba.iban, ba.branch_name, ba.currency,
-              a.agent_name, a.company_name as agent_company
+              a.agent_name, a.company_name as agent_company, a.email as agent_email, a.phone as agent_phone
        FROM invoices i
        LEFT JOIN bank_accounts ba ON i.bank_account_id = ba.id
        LEFT JOIN agents a ON i.agent_id = a.id
@@ -1092,10 +1092,12 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       agentId, agentCommissionPercent, agentCommissionAmount,
       notes,
       showConvertedCurrency,
+      studentName, studentEmail, studentMobile,
+      agentName, agentEmail, agentPhone,
     } = req.body;
 
     const [existing] = await connection.query(
-      'SELECT id, paid_amount, final_amount FROM invoices WHERE id = ?',
+      'SELECT id, paid_amount, final_amount, invoice_type, is_manual_student, agent_id FROM invoices WHERE id = ?',
       [invoiceId]
     );
     if (existing.length === 0) {
@@ -1197,6 +1199,44 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
         invoiceId
       ]
     );
+
+    if (existing[0].invoice_type === 'Student' && (studentName !== undefined || studentEmail !== undefined || studentMobile !== undefined)) {
+      await connection.query(
+        `UPDATE invoices SET
+          student_name=?,
+          student_email=?,
+          student_mobile=?,
+          manual_student_name=CASE WHEN is_manual_student=1 THEN ? ELSE manual_student_name END,
+          manual_student_email=CASE WHEN is_manual_student=1 THEN ? ELSE manual_student_email END,
+          manual_student_mobile=CASE WHEN is_manual_student=1 THEN ? ELSE manual_student_mobile END
+         WHERE id=?`,
+        [
+          studentName?.trim() || null,
+          studentEmail?.trim() || null,
+          studentMobile?.trim() || null,
+          studentName?.trim() || null,
+          studentEmail?.trim() || null,
+          studentMobile?.trim() || null,
+          invoiceId
+        ]
+      );
+    }
+
+    if (existing[0].invoice_type === 'Agent Commission' && existing[0].agent_id && (agentName !== undefined || agentEmail !== undefined || agentPhone !== undefined)) {
+      await connection.query(
+        `UPDATE agents SET
+          agent_name=COALESCE(?, agent_name),
+          email=?,
+          phone=?
+         WHERE id=?`,
+        [
+          agentName?.trim() || null,
+          agentEmail?.trim() || null,
+          agentPhone?.trim() || null,
+          existing[0].agent_id
+        ]
+      );
+    }
 
     const payments = await fetchInvoicePayments(connection, invoiceId);
     let resolvedStatus;
