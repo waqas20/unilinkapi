@@ -1280,6 +1280,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
     const invoiceId = lead.invoice_id || null;
 
     const nameParts = (lead.full_name || '').trim().split(/\s+/).filter(Boolean);
+    const resolvedCountries = resolveLeadCountries(lead.countries_of_interest, lead.countries_other);
+    const countryFromLead = resolvedCountries.length ? resolvedCountries.join(', ') : null;
+
     const leadDefaults = {
       name: nameParts[0] || '',
       middle_name: nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '',
@@ -1287,8 +1290,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       email: lead.email || '',
       mobile: lead.phone || '',
       address: lead.address || '',
-      course: lead.course || '',
-      source_inquiry: lead.interest || '',
+      country: countryFromLead,
+      course: lead.course || lead.program || '',
+      source_inquiry: lead.referred_by || '',
       status: 'Active',
     };
 
@@ -1299,8 +1303,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       nationality, marital_status, gender,
       dob, city_of_birth, country_of_birth,
       passport_no, passport_issue_date, passport_place_of_issue,
-      address, postal_code, mobile, landline,
+      address, postal_code, country,
       email, alternative_email,
+      mobile, landline,
       course, source_inquiry,
       status: studentStatus,
     } = mergedInfo;
@@ -1385,7 +1390,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
          (student_id, name, middle_name, surname,
           email, alternative_email,
           mobile, landline,
-          address, postal_code,
+          address, postal_code, country,
           nationality, marital_status, gender,
           dob, city_of_birth, country_of_birth,
           passport_no, passport_issue_date, passport_place_of_issue,
@@ -1394,7 +1399,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           invoice_id,
           source_lead_id,
           password, plain_password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId,
         name.trim(),
@@ -1406,6 +1411,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         landline?.trim() || null,
         address.trim(),
         postal_code?.trim() || null,
+        country?.trim() || null,
         nationality?.trim() || null,
         marital_status || null,
         gender || null,
