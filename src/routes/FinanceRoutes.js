@@ -534,9 +534,22 @@ router.delete('/finance/agents/:agentId', async (req, res) => {
 // ============================================================
 router.get('/finance/statistics', async (req, res) => {
   try {
-    const { month, year } = req.query;
-    const targetMonth = month || new Date().getMonth() + 1;
-    const targetYear  = year  || new Date().getFullYear();
+    const { month, year, dateFrom, dateTo } = req.query;
+    let dateClause = '';
+    const dateParams = [];
+
+    if (dateFrom) {
+      dateClause += ' AND DATE(invoice_date) >= ?';
+      dateParams.push(dateFrom);
+    }
+    if (dateTo) {
+      dateClause += ' AND DATE(invoice_date) <= ?';
+      dateParams.push(dateTo);
+    }
+    if (!dateFrom && !dateTo && month && year) {
+      dateClause += ' AND MONTH(invoice_date) = ? AND YEAR(invoice_date) = ?';
+      dateParams.push(month, year);
+    }
 
     const [stats] = await pool.query(
       `SELECT
@@ -548,9 +561,24 @@ router.get('/finance/statistics', async (req, res) => {
         COUNT(CASE WHEN payment_status = 'Pending' THEN 1 END) as pending_count,
         COUNT(CASE WHEN payment_status = 'Paid'    THEN 1 END) as paid_count
        FROM invoices
-       WHERE MONTH(invoice_date) = ? AND YEAR(invoice_date) = ?`,
-      [targetMonth, targetYear]
+       WHERE 1=1${dateClause}`,
+      dateParams
     );
+
+    let bankJoin = '';
+    const bankParams = [];
+    if (dateFrom) {
+      bankJoin += ' AND DATE(i.invoice_date) >= ?';
+      bankParams.push(dateFrom);
+    }
+    if (dateTo) {
+      bankJoin += ' AND DATE(i.invoice_date) <= ?';
+      bankParams.push(dateTo);
+    }
+    if (!dateFrom && !dateTo && month && year) {
+      bankJoin += ' AND MONTH(i.invoice_date) = ? AND YEAR(i.invoice_date) = ?';
+      bankParams.push(month, year);
+    }
 
     const [bankStats] = await pool.query(
       `SELECT ba.id, ba.account_name, ba.bank_name, ba.currency,
@@ -559,12 +587,10 @@ router.get('/finance/statistics', async (req, res) => {
         COALESCE(SUM(CASE WHEN i.invoice_type = 'Agent Commission' THEN i.final_amount ELSE 0 END), 0) as agent_payout,
         COUNT(i.id) as invoice_count
        FROM bank_accounts ba
-       LEFT JOIN invoices i ON ba.id = i.bank_account_id
-         AND MONTH(i.invoice_date) = ?
-         AND YEAR(i.invoice_date) = ?
+       LEFT JOIN invoices i ON ba.id = i.bank_account_id${bankJoin}
        WHERE ba.status = 'Active'
        GROUP BY ba.id`,
-      [targetMonth, targetYear]
+      bankParams
     );
 
     res.json({ success: true, statistics: stats[0], bankStats });
