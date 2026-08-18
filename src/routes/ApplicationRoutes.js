@@ -577,7 +577,7 @@ router.get('/dashboard/recent-applications', async (req, res) => {
          a.id, a.application_id, a.program, a.application_status, 
          a.created_at, u.name, u.student_id, c.country_name
        ORDER BY a.created_at DESC
-       LIMIT 10`
+       LIMIT 5`
     );
     res.json({ success: true, applications });
   } catch (error) {
