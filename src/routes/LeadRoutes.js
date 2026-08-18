@@ -213,6 +213,23 @@ const serializeCountries = (countriesOfInterest) => {
   return JSON.stringify(countriesOfInterest);
 };
 
+const normalizeChangeValue = (value) => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value).trim();
+    }
+  }
+  return String(value).trim();
+};
+
+const serializeChangeValue = (value) => {
+  const normalized = normalizeChangeValue(value);
+  return normalized === '' ? null : normalized;
+};
+
 const parseLeadCountries = (countriesOfInterest) => {
   if (!countriesOfInterest) return [];
   try {
@@ -714,10 +731,16 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
     for (const [requestField, dbField] of Object.entries(fieldsToTrack)) {
       const newValue = newValues[requestField];
       const oldValue = oldData[dbField];
-      const oldVal = oldValue === null ? '' : String(oldValue).trim();
-      const newVal = newValue === null ? '' : String(newValue).trim();
+      const oldVal = normalizeChangeValue(oldValue);
+      const newVal = normalizeChangeValue(newValue);
       if (newVal !== oldVal) {
-        changes.push([leadId, followUpId, dbField, oldValue, newValue]);
+        changes.push([
+          leadId,
+          followUpId,
+          dbField,
+          serializeChangeValue(oldValue),
+          serializeChangeValue(newValue)
+        ]);
       }
     }
     
