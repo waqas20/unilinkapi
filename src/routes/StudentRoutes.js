@@ -126,6 +126,23 @@ const serializePassportNo = (passportNo) => {
   return null;
 };
 
+const normalizeEducationMonth = (value) => {
+  if (!value) return null;
+  const v = String(value).trim();
+  if (/^\d{4}-\d{2}$/.test(v)) return `${v}-01`;
+  if (v.includes('T')) return v.split('T')[0];
+  return v.slice(0, 10);
+};
+
+const mapEducationRow = (edu) => [
+  edu.education_level?.trim() || null,
+  edu.institute_name?.trim() || null,
+  normalizeEducationMonth(edu.start_date),
+  normalizeEducationMonth(edu.end_date),
+  edu.subjects?.trim() || null,
+  (edu.grade_cgpa ?? edu.result ?? edu.cgpa)?.trim() || null,
+];
+
 const generateStudentId = async (connection) => {
   const currentYear = new Date().getFullYear();
   const [result] = await connection.query(
@@ -493,15 +510,11 @@ router.post('/students', async (req, res) => {
 
     if (education && Array.isArray(education) && education.length > 0) {
       const educationValues = education
-        .filter(edu => edu.education_level && edu.institute_name)
-        .map(edu => [
-          newStudentId, edu.education_level, edu.institute_name,
-          edu.start_date || null, edu.end_date || null,
-          edu.result || null, edu.subjects || null, edu.cgpa || null, edu.remarks || null
-        ]);
+        .filter(edu => edu.education_level?.trim() && edu.institute_name?.trim())
+        .map(edu => [newStudentId, ...mapEducationRow(edu)]);
       if (educationValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, result, subjects, cgpa, remarks)
+          `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, subjects, result)
            VALUES ?`,
           [educationValues]
         );
@@ -684,16 +697,11 @@ router.put('/students/:studentId', async (req, res) => {
     if (education && Array.isArray(education)) {
       await connection.query('DELETE FROM student_education WHERE student_id = ?', [studentId]);
       const educationValues = education
-        .filter(edu => edu.education_level && edu.institute_name)
-        .map(edu => [
-          studentId, edu.education_level, edu.institute_name,
-          edu.start_date ? edu.start_date.split('T')[0] : null,
-          edu.end_date ? edu.end_date.split('T')[0] : null,
-          edu.result || null, edu.subjects || null, edu.cgpa || null, edu.remarks || null
-        ]);
+        .filter(edu => edu.education_level?.trim() && edu.institute_name?.trim())
+        .map(edu => [studentId, ...mapEducationRow(edu)]);
       if (educationValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, result, subjects, cgpa, remarks)
+          `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, subjects, result)
            VALUES ?`,
           [educationValues]
         );
