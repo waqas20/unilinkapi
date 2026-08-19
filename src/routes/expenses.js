@@ -3,6 +3,31 @@ import pool from '../config/db.js';
 
 const router = express.Router();
 
+const ensureExpenseAccountColumns = async (db) => {
+  await db.query(`
+    ALTER TABLE expenses
+    ADD COLUMN IF NOT EXISTS payment_source ENUM('bank','cash') NOT NULL DEFAULT 'cash'
+  `).catch(async () => {
+    try {
+      await db.query(`ALTER TABLE expenses ADD COLUMN payment_source ENUM('bank','cash') NOT NULL DEFAULT 'cash'`);
+    } catch { /* exists */ }
+  });
+  await db.query(`
+    ALTER TABLE expenses
+    ADD COLUMN IF NOT EXISTS bank_account_id INT NULL
+  `).catch(async () => {
+    try {
+      await db.query(`ALTER TABLE expenses ADD COLUMN bank_account_id INT NULL`);
+    } catch { /* exists */ }
+  });
+};
+
+const resolvePaymentSource = ({ paymentSource, paymentMode, bankAccountId }) => {
+  const source = paymentSource === 'bank' ? 'bank' : 'cash';
+  const accountId = source === 'bank' ? (parseInt(bankAccountId, 10) || null) : null;
+  return { source, accountId, paymentMode };
+};
+
 // Generate Expense ID: EXP2025001
 const generateExpenseId = async (connection) => {
   const currentYear = new Date().getFullYear();
@@ -18,47 +43,50 @@ const generateExpenseId = async (connection) => {
 // GET all expenses
 router.get('/expenses', async (req, res) => {
   try {
+    await ensureExpenseAccountColumns(pool);
     const { category, paymentMode, searchQuery, startDate, endDate } = req.query;
 
-    let query = 'SELECT * FROM expenses WHERE 1=1';
+    let query = `SELECT e.*, ba.account_name, ba.bank_name
+                 FROM expenses e
+                 LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id
+                 WHERE 1=1`;
     const params = [];
 
     if (category) {
-      query += ' AND category = ?';
+      query += ' AND e.category = ?';
       params.push(category);
     }
 
     if (paymentMode) {
-      query += ' AND payment_mode = ?';
+      query += ' AND e.payment_mode = ?';
       params.push(paymentMode);
     }
 
     if (searchQuery) {
-      query += ' AND (name LIKE ? OR expense_id LIKE ? OR description LIKE ?)';
+      query += ' AND (e.name LIKE ? OR e.expense_id LIKE ? OR e.description LIKE ?)';
       const s = `%${searchQuery}%`;
       params.push(s, s, s);
     }
 
     if (startDate) {
-      query += ' AND expense_date >= ?';
+      query += ' AND e.expense_date >= ?';
       params.push(startDate);
     }
 
     if (endDate) {
-      query += ' AND expense_date <= ?';
+      query += ' AND e.expense_date <= ?';
       params.push(endDate);
     }
 
-    query += ' ORDER BY expense_date DESC, created_at DESC';
+    query += ' ORDER BY e.expense_date DESC, e.created_at DESC';
 
     const [expenses] = await pool.query(query, params);
 
-    // Stats
     const [all] = await pool.query('SELECT amount, category FROM expenses');
     const totalExpenses = all.length;
     const totalAmount = all.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);
 
-    const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+    const currentMonth = new Date().toISOString().slice(0, 7);
     const [monthlyRows] = await pool.query(
       `SELECT SUM(amount) as monthly FROM expenses WHERE DATE_FORMAT(expense_date, '%Y-%m') = ?`,
       [currentMonth]
@@ -94,19 +122,26 @@ router.post('/expenses', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
+    await ensureExpenseAccountColumns(connection);
 
-    const { category, name, description, amount, paymentMode, expenseDate, referenceNo } = req.body;
+    const { category, name, description, amount, paymentMode, expenseDate, referenceNo, paymentSource, bankAccountId } = req.body;
 
     if (!category || !name || !amount || !paymentMode || !expenseDate) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Category, name, amount, payment mode and date are required' });
     }
 
+    const { source, accountId } = resolvePaymentSource({ paymentSource, paymentMode, bankAccountId });
+    if (source === 'bank' && !accountId) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Please select a bank account for this expense' });
+    }
+
     const expenseId = await generateExpenseId(connection);
 
     await connection.query(
-      `INSERT INTO expenses (expense_id, category, name, description, amount, payment_mode, expense_date, reference_no)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO expenses (expense_id, category, name, description, amount, payment_mode, expense_date, reference_no, payment_source, bank_account_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         expenseId,
         category,
@@ -115,7 +150,9 @@ router.post('/expenses', async (req, res) => {
         parseFloat(amount),
         paymentMode,
         expenseDate,
-        referenceNo?.trim() || null
+        referenceNo?.trim() || null,
+        source,
+        accountId
       ]
     );
 
@@ -136,9 +173,10 @@ router.put('/expenses/:id', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
+    await ensureExpenseAccountColumns(connection);
 
     const { id } = req.params;
-    const { category, name, description, amount, paymentMode, expenseDate, referenceNo } = req.body;
+    const { category, name, description, amount, paymentMode, expenseDate, referenceNo, paymentSource, bankAccountId } = req.body;
 
     if (!category || !name || !amount || !paymentMode || !expenseDate) {
       await connection.rollback();
@@ -151,9 +189,16 @@ router.put('/expenses/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Expense not found' });
     }
 
+    const { source, accountId } = resolvePaymentSource({ paymentSource, paymentMode, bankAccountId });
+    if (source === 'bank' && !accountId) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Please select a bank account for this expense' });
+    }
+
     await connection.query(
       `UPDATE expenses SET
-        category = ?, name = ?, description = ?, amount = ?, payment_mode = ?, expense_date = ?, reference_no = ?
+        category = ?, name = ?, description = ?, amount = ?, payment_mode = ?, expense_date = ?,
+        reference_no = ?, payment_source = ?, bank_account_id = ?
        WHERE id = ?`,
       [
         category,
@@ -163,6 +208,8 @@ router.put('/expenses/:id', async (req, res) => {
         paymentMode,
         expenseDate,
         referenceNo?.trim() || null,
+        source,
+        accountId,
         id
       ]
     );

@@ -138,6 +138,8 @@ router.get('/finance/migrate', async (req, res) => {
       WHERE i.paid_amount IS NOT NULL AND i.paid_amount > 0 AND p.id IS NULL
     `).catch(() => {});
 
+    await ensureFinanceLedgerSchema(connection);
+
     res.json({ success: true, message: 'Migration applied successfully' });
   } catch (error) {
     console.error('Migration error:', error);
@@ -199,6 +201,221 @@ const recomputeInvoicePaymentTotals = async (connection, invoiceId, statusOverri
   return { totalPaid, lastDate, paymentStatus };
 };
 
+const toYMD = (value) => {
+  if (!value) return '';
+  const match = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
+};
+
+const inDateRange = (ymd, from, to) => {
+  if (!ymd) return false;
+  if (from && ymd < from) return false;
+  if (to && ymd > to) return false;
+  return true;
+};
+
+const beforeDateRange = (ymd, from) => {
+  if (!ymd) return false;
+  if (!from) return false;
+  return ymd < from;
+};
+
+const addLedgerAmount = (bucket, amount, ymd, from, to) => {
+  const n = parseFloat(amount) || 0;
+  if (n <= 0) return;
+  bucket.lifetime += n;
+  if (inDateRange(ymd, from, to)) bucket.period += n;
+  if (beforeDateRange(ymd, from)) bucket.before += n;
+};
+
+const ensureFinanceLedgerSchema = async (connection) => {
+  const db = connection || pool;
+  await db.query(`
+    ALTER TABLE bank_accounts
+    ADD COLUMN IF NOT EXISTS opening_balance DECIMAL(15,2) NOT NULL DEFAULT 0
+  `).catch(async () => {
+    try {
+      await db.query(`ALTER TABLE bank_accounts ADD COLUMN opening_balance DECIMAL(15,2) NOT NULL DEFAULT 0`);
+    } catch { /* already exists */ }
+  });
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS finance_settings (
+      id INT PRIMARY KEY,
+      cash_opening_balance DECIMAL(15,2) NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `).catch(() => {});
+
+  await db.query(`
+    INSERT IGNORE INTO finance_settings (id, cash_opening_balance) VALUES (1, 0)
+  `).catch(() => {});
+
+  await db.query(`
+    ALTER TABLE expenses
+    ADD COLUMN IF NOT EXISTS payment_source ENUM('bank','cash') NOT NULL DEFAULT 'cash'
+  `).catch(async () => {
+    try {
+      await db.query(`ALTER TABLE expenses ADD COLUMN payment_source ENUM('bank','cash') NOT NULL DEFAULT 'cash'`);
+    } catch { /* already exists */ }
+  });
+
+  await db.query(`
+    ALTER TABLE expenses
+    ADD COLUMN IF NOT EXISTS bank_account_id INT NULL
+  `).catch(async () => {
+    try {
+      await db.query(`ALTER TABLE expenses ADD COLUMN bank_account_id INT NULL`);
+    } catch { /* already exists */ }
+  });
+};
+
+const getCashOpeningBalance = async (db) => {
+  try {
+    const [rows] = await db.query('SELECT cash_opening_balance FROM finance_settings WHERE id = 1');
+    return parseFloat(rows[0]?.cash_opening_balance) || 0;
+  } catch {
+    return 0;
+  }
+};
+
+const loadInvoiceLedgerRows = async (db) => {
+  try {
+    const [rows] = await db.query(`
+      SELECT p.amount, p.payment_date,
+             i.bank_account_id, i.payment_method, i.invoice_type, i.payment_status
+      FROM invoice_payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      WHERE i.payment_status IN ('Paid', 'Partially Paid')
+    `);
+    if (rows.length > 0) return rows;
+
+    const [fallback] = await db.query(`
+      SELECT COALESCE(paid_amount, 0) AS amount,
+             COALESCE(payment_date, invoice_date) AS payment_date,
+             bank_account_id, payment_method, invoice_type, payment_status
+      FROM invoices
+      WHERE payment_status IN ('Paid', 'Partially Paid')
+        AND COALESCE(paid_amount, 0) > 0
+    `);
+    return fallback;
+  } catch {
+    const [fallback] = await db.query(`
+      SELECT COALESCE(paid_amount, 0) AS amount,
+             COALESCE(payment_date, invoice_date) AS payment_date,
+             bank_account_id, payment_method, invoice_type, payment_status
+      FROM invoices
+      WHERE payment_status IN ('Paid', 'Partially Paid')
+        AND COALESCE(paid_amount, 0) > 0
+    `);
+    return fallback;
+  }
+};
+
+const buildFinanceOverview = async (db, dateFrom, dateTo) => {
+  const [accounts] = await db.query(
+    `SELECT id, account_name, bank_name, account_number, currency, status, opening_balance
+     FROM bank_accounts
+     ORDER BY status ASC, account_name ASC`
+  );
+  const cashOpening = await getCashOpeningBalance(db);
+  const invoiceRows = await loadInvoiceLedgerRows(db);
+
+  let expenseRows = [];
+  try {
+    const [rows] = await db.query(`
+      SELECT amount, expense_date, bank_account_id, payment_source, payment_mode
+      FROM expenses
+    `);
+    expenseRows = rows;
+  } catch {
+    expenseRows = [];
+  }
+
+  const cashCredit = { lifetime: 0, period: 0, before: 0 };
+  const cashDebit = { lifetime: 0, period: 0, before: 0 };
+  const bankMap = {};
+  accounts.forEach((acc) => {
+    bankMap[acc.id] = {
+      credit: { lifetime: 0, period: 0, before: 0 },
+      debit: { lifetime: 0, period: 0, before: 0 },
+    };
+  });
+
+  invoiceRows.forEach((row) => {
+    const amount = parseFloat(row.amount) || 0;
+    if (amount <= 0) return;
+    const ymd = toYMD(row.payment_date);
+    const isCash = row.payment_method === 'cash';
+    const isPayout = row.invoice_type === 'Agent Commission';
+    const target = isCash
+      ? (isPayout ? cashDebit : cashCredit)
+      : bankMap[row.bank_account_id]
+        ? (isPayout ? bankMap[row.bank_account_id].debit : bankMap[row.bank_account_id].credit)
+        : null;
+    if (!target) return;
+    addLedgerAmount(target, amount, ymd, dateFrom, dateTo);
+  });
+
+  expenseRows.forEach((row) => {
+    const amount = parseFloat(row.amount) || 0;
+    if (amount <= 0) return;
+    const ymd = toYMD(row.expense_date);
+    const isBank = row.payment_source === 'bank' && row.bank_account_id && bankMap[row.bank_account_id];
+    const target = isBank ? bankMap[row.bank_account_id].debit : cashDebit;
+    addLedgerAmount(target, amount, ymd, dateFrom, dateTo);
+  });
+
+  const finalize = (opening, credit, debit) => {
+    const currentBalance = opening + credit.lifetime - debit.lifetime;
+    const periodOpening = opening + credit.before - debit.before;
+    const net = credit.period - debit.period;
+    return {
+      openingBalance: opening,
+      periodOpening,
+      periodCredit: credit.period,
+      periodDebit: debit.period,
+      periodNet: net,
+      currentBalance,
+    };
+  };
+
+  const bankAccounts = accounts.map((acc) => {
+    const ledger = bankMap[acc.id];
+    const opening = parseFloat(acc.opening_balance) || 0;
+    return {
+      id: acc.id,
+      accountName: acc.account_name,
+      bankName: acc.bank_name,
+      accountNumber: acc.account_number,
+      currency: acc.currency,
+      status: acc.status,
+      ...finalize(opening, ledger.credit, ledger.debit),
+    };
+  });
+
+  const cash = {
+    label: 'Cash',
+    ...finalize(cashOpening, cashCredit, cashDebit),
+  };
+
+  const totals = bankAccounts.reduce((acc, bank) => {
+    acc.periodOpening += bank.periodOpening;
+    acc.periodCredit += bank.periodCredit;
+    acc.periodDebit += bank.periodDebit;
+    acc.currentBalance += bank.currentBalance;
+    return acc;
+  }, {
+    periodOpening: cash.periodOpening,
+    periodCredit: cash.periodCredit,
+    periodDebit: cash.periodDebit,
+    currentBalance: cash.currentBalance,
+  });
+  totals.periodNet = totals.periodCredit - totals.periodDebit;
+
+  return { bankAccounts, cash, totals };
+};
+
 const fetchInvoicePayments = async (db, invoiceId) => {
   try {
     const [payments] = await db.query(
@@ -216,11 +433,54 @@ const fetchInvoicePayments = async (db, invoiceId) => {
 };
 
 // ============================================================
+// FINANCE OVERVIEW
+// ============================================================
+
+router.get('/finance/overview', async (req, res) => {
+  try {
+    await ensureFinanceLedgerSchema(pool);
+    const { dateFrom, dateTo } = req.query;
+    const overview = await buildFinanceOverview(pool, dateFrom || '', dateTo || '');
+    res.json({ success: true, ...overview, dateFrom: dateFrom || null, dateTo: dateTo || null });
+  } catch (error) {
+    console.error('Error fetching finance overview:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch finance overview' });
+  }
+});
+
+router.put('/finance/cash-opening', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await ensureFinanceLedgerSchema(connection);
+    const amount = parseFloat(req.body.cashOpeningBalance);
+    if (!isFinite(amount) || amount < 0) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'A valid cash opening balance is required' });
+    }
+    await connection.query(
+      `INSERT INTO finance_settings (id, cash_opening_balance) VALUES (1, ?)
+       ON DUPLICATE KEY UPDATE cash_opening_balance = VALUES(cash_opening_balance)`,
+      [amount]
+    );
+    await connection.commit();
+    res.json({ success: true, message: 'Cash opening balance updated', cashOpeningBalance: amount });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating cash opening:', error);
+    res.status(500).json({ success: false, message: 'Failed to update cash opening balance' });
+  } finally {
+    connection.release();
+  }
+});
+
+// ============================================================
 // BANK ACCOUNTS
 // ============================================================
 
 router.get('/finance/bank-accounts', async (req, res) => {
   try {
+    await ensureFinanceLedgerSchema(pool);
     const [accounts] = await pool.query(
       `SELECT ba.*,
         (SELECT COALESCE(SUM(i.final_amount),0) 
@@ -262,15 +522,20 @@ router.post('/finance/bank-accounts', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const { accountName, bankName, accountNumber, iban, branchName, branchCode, currency, status } = req.body;
+    const { accountName, bankName, accountNumber, iban, branchName, branchCode, currency, status, openingBalance } = req.body;
     if (!accountName || !bankName || !accountNumber) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Account name, bank name, and account number are required' });
     }
+    await ensureFinanceLedgerSchema(connection);
     const [result] = await connection.query(
-      `INSERT INTO bank_accounts (account_name, bank_name, account_number, iban, branch_name, branch_code, currency, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [accountName.trim(), bankName.trim(), accountNumber.trim(), iban?.trim() || null, branchName?.trim() || null, branchCode?.trim() || null, currency || 'PKR', status || 'Active']
+      `INSERT INTO bank_accounts (account_name, bank_name, account_number, iban, branch_name, branch_code, currency, status, opening_balance)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        accountName.trim(), bankName.trim(), accountNumber.trim(), iban?.trim() || null,
+        branchName?.trim() || null, branchCode?.trim() || null, currency || 'PKR', status || 'Active',
+        parseFloat(openingBalance) || 0
+      ]
     );
     await connection.commit();
     res.status(201).json({ success: true, message: 'Bank account created successfully', accountId: result.insertId });
@@ -288,7 +553,7 @@ router.put('/finance/bank-accounts/:accountId', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { accountId } = req.params;
-    const { accountName, bankName, accountNumber, iban, branchName, branchCode, currency, status } = req.body;
+    const { accountName, bankName, accountNumber, iban, branchName, branchCode, currency, status, openingBalance } = req.body;
     if (!accountName || !bankName || !accountNumber) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Account name, bank name, and account number are required' });
@@ -298,10 +563,15 @@ router.put('/finance/bank-accounts/:accountId', async (req, res) => {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Bank account not found' });
     }
+    await ensureFinanceLedgerSchema(connection);
     await connection.query(
       `UPDATE bank_accounts SET account_name=?, bank_name=?, account_number=?, iban=?,
-       branch_name=?, branch_code=?, currency=?, status=? WHERE id=?`,
-      [accountName.trim(), bankName.trim(), accountNumber.trim(), iban?.trim() || null, branchName?.trim() || null, branchCode?.trim() || null, currency || 'PKR', status || 'Active', accountId]
+       branch_name=?, branch_code=?, currency=?, status=?, opening_balance=? WHERE id=?`,
+      [
+        accountName.trim(), bankName.trim(), accountNumber.trim(), iban?.trim() || null,
+        branchName?.trim() || null, branchCode?.trim() || null, currency || 'PKR', status || 'Active',
+        parseFloat(openingBalance) || 0, accountId
+      ]
     );
     await connection.commit();
     res.json({ success: true, message: 'Bank account updated successfully' });
