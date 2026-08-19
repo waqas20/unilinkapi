@@ -203,8 +203,23 @@ const recomputeInvoicePaymentTotals = async (connection, invoiceId, statusOverri
 
 const toYMD = (value) => {
   if (!value) return '';
-  const match = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1] : '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const raw = String(value);
+  const iso = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return '';
 };
 
 const inDateRange = (ymd, from, to) => {
@@ -282,7 +297,7 @@ const getCashOpeningBalance = async (db) => {
 const loadInvoiceLedgerRows = async (db) => {
   try {
     const [rows] = await db.query(`
-      SELECT p.amount, p.payment_date,
+      SELECT p.amount, DATE_FORMAT(p.payment_date, '%Y-%m-%d') AS payment_date,
              i.bank_account_id, i.payment_method, i.invoice_type, i.payment_status
       FROM invoice_payments p
       INNER JOIN invoices i ON i.id = p.invoice_id
@@ -292,7 +307,7 @@ const loadInvoiceLedgerRows = async (db) => {
 
     const [fallback] = await db.query(`
       SELECT COALESCE(paid_amount, 0) AS amount,
-             COALESCE(payment_date, invoice_date) AS payment_date,
+             DATE_FORMAT(COALESCE(payment_date, invoice_date), '%Y-%m-%d') AS payment_date,
              bank_account_id, payment_method, invoice_type, payment_status
       FROM invoices
       WHERE payment_status IN ('Paid', 'Partially Paid')
@@ -302,7 +317,7 @@ const loadInvoiceLedgerRows = async (db) => {
   } catch {
     const [fallback] = await db.query(`
       SELECT COALESCE(paid_amount, 0) AS amount,
-             COALESCE(payment_date, invoice_date) AS payment_date,
+             DATE_FORMAT(COALESCE(payment_date, invoice_date), '%Y-%m-%d') AS payment_date,
              bank_account_id, payment_method, invoice_type, payment_status
       FROM invoices
       WHERE payment_status IN ('Paid', 'Partially Paid')
@@ -324,7 +339,7 @@ const buildFinanceOverview = async (db, dateFrom, dateTo) => {
   let expenseRows = [];
   try {
     const [rows] = await db.query(`
-      SELECT amount, expense_date, bank_account_id, payment_source, payment_mode
+      SELECT amount, DATE_FORMAT(expense_date, '%Y-%m-%d') AS expense_date, bank_account_id, payment_source, payment_mode
       FROM expenses
     `);
     expenseRows = rows;
