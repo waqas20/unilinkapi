@@ -431,6 +431,154 @@ const buildFinanceOverview = async (db, dateFrom, dateTo) => {
   return { bankAccounts, cash, totals };
 };
 
+  return { bankAccounts, cash, totals };
+};
+
+const loadBankAccountTransactions = async (db, accountId, dateFrom, dateTo) => {
+  const transactions = [];
+  const accountKey = Number(accountId);
+
+  try {
+    const [paymentRows] = await db.query(`
+      SELECT p.amount,
+             DATE_FORMAT(p.payment_date, '%Y-%m-%d') AS txn_date,
+             i.invoice_id, i.invoice_type, i.payment_method, i.payment_status,
+             i.student_name, i.manual_student_name, i.university_name,
+             a.agent_name
+      FROM invoice_payments p
+      INNER JOIN invoices i ON i.id = p.invoice_id
+      LEFT JOIN agents a ON a.id = i.agent_id
+      WHERE i.bank_account_id = ?
+        AND (i.payment_method IS NULL OR i.payment_method != 'cash')
+        AND i.payment_status IN ('Paid', 'Partially Paid')
+      ORDER BY p.payment_date DESC, p.id DESC
+    `, [accountKey]);
+
+    if (paymentRows.length === 0) {
+      const [fallback] = await db.query(`
+        SELECT COALESCE(paid_amount, 0) AS amount,
+               DATE_FORMAT(COALESCE(payment_date, invoice_date), '%Y-%m-%d') AS txn_date,
+               invoice_id, invoice_type, payment_method, payment_status,
+               student_name, manual_student_name, university_name
+        FROM invoices
+        WHERE bank_account_id = ?
+          AND (payment_method IS NULL OR payment_method != 'cash')
+          AND payment_status IN ('Paid', 'Partially Paid')
+          AND COALESCE(paid_amount, 0) > 0
+      `, [accountKey]);
+
+      fallback.forEach((row) => {
+        const amount = parseFloat(row.amount) || 0;
+        if (amount <= 0) return;
+        const ymd = toYMD(row.txn_date);
+        if ((dateFrom || dateTo) && !inDateRange(ymd, dateFrom, dateTo)) return;
+        const isPayout = row.invoice_type === 'Agent Commission';
+        const party = row.manual_student_name || row.student_name || row.university_name || 'Invoice';
+        transactions.push({
+          date: ymd,
+          type: isPayout ? 'debit' : 'credit',
+          amount,
+          description: `${isPayout ? 'Agent payout' : 'Invoice payment'} — ${row.invoice_id} (${party})`,
+          reference: row.invoice_id,
+          source: isPayout ? 'Agent Commission' : 'Invoice Payment',
+        });
+      });
+    } else {
+      paymentRows.forEach((row) => {
+        const amount = parseFloat(row.amount) || 0;
+        if (amount <= 0) return;
+        const ymd = toYMD(row.txn_date);
+        if ((dateFrom || dateTo) && !inDateRange(ymd, dateFrom, dateTo)) return;
+
+        const isPayout = row.invoice_type === 'Agent Commission';
+        const party = isPayout
+          ? (row.agent_name || 'Agent')
+          : (row.manual_student_name || row.student_name || row.university_name || 'Invoice');
+        const label = isPayout
+          ? `Agent payout — ${row.invoice_id} (${party})`
+          : `Invoice payment — ${row.invoice_id} (${party})`;
+
+        transactions.push({
+          date: ymd,
+          type: isPayout ? 'debit' : 'credit',
+          amount,
+          description: label,
+          reference: row.invoice_id,
+          source: isPayout ? 'Agent Commission' : 'Invoice Payment',
+        });
+      });
+    }
+  } catch {
+    const [fallback] = await db.query(`
+      SELECT COALESCE(paid_amount, 0) AS amount,
+             DATE_FORMAT(COALESCE(payment_date, invoice_date), '%Y-%m-%d') AS txn_date,
+             invoice_id, invoice_type, payment_method, payment_status,
+             student_name, manual_student_name, university_name
+      FROM invoices
+      WHERE bank_account_id = ?
+        AND (payment_method IS NULL OR payment_method != 'cash')
+        AND payment_status IN ('Paid', 'Partially Paid')
+        AND COALESCE(paid_amount, 0) > 0
+    `, [accountKey]);
+
+    fallback.forEach((row) => {
+      const amount = parseFloat(row.amount) || 0;
+      if (amount <= 0) return;
+      const ymd = toYMD(row.txn_date);
+      if ((dateFrom || dateTo) && !inDateRange(ymd, dateFrom, dateTo)) return;
+      const isPayout = row.invoice_type === 'Agent Commission';
+      const party = row.manual_student_name || row.student_name || row.university_name || 'Invoice';
+      transactions.push({
+        date: ymd,
+        type: isPayout ? 'debit' : 'credit',
+        amount,
+        description: `${isPayout ? 'Agent payout' : 'Invoice payment'} — ${row.invoice_id} (${party})`,
+        reference: row.invoice_id,
+        source: isPayout ? 'Agent Commission' : 'Invoice Payment',
+      });
+    });
+  }
+
+  try {
+    const [expenseRows] = await db.query(`
+      SELECT amount, DATE_FORMAT(expense_date, '%Y-%m-%d') AS txn_date,
+             expense_id, name, category, description, payment_mode
+      FROM expenses
+      WHERE payment_source = 'bank' AND bank_account_id = ?
+      ORDER BY expense_date DESC, id DESC
+    `, [accountKey]);
+
+    expenseRows.forEach((row) => {
+      const amount = parseFloat(row.amount) || 0;
+      if (amount <= 0) return;
+      const ymd = toYMD(row.txn_date);
+      if ((dateFrom || dateTo) && !inDateRange(ymd, dateFrom, dateTo)) return;
+      transactions.push({
+        date: ymd,
+        type: 'debit',
+        amount,
+        description: `${row.category || 'Expense'} — ${row.name}${row.description ? ` (${row.description})` : ''}`,
+        reference: row.expense_id,
+        source: 'Expense',
+      });
+    });
+  } catch { /* expenses table or columns may not exist yet */ }
+
+  transactions.sort((a, b) => {
+    if (a.date === b.date) return 0;
+    return a.date < b.date ? 1 : -1;
+  });
+
+  const totals = transactions.reduce((acc, txn) => {
+    if (txn.type === 'credit') acc.credit += txn.amount;
+    else acc.debit += txn.amount;
+    return acc;
+  }, { credit: 0, debit: 0 });
+  totals.net = totals.credit - totals.debit;
+
+  return { transactions, totals };
+};
+
 const fetchInvoicePayments = async (db, invoiceId) => {
   try {
     const [payments] = await db.query(
@@ -518,6 +666,41 @@ router.get('/finance/bank-accounts', async (req, res) => {
   } catch (error) {
     console.error('Error fetching bank accounts:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch bank accounts' });
+  }
+});
+
+router.get('/finance/bank-accounts/:accountId/transactions', async (req, res) => {
+  try {
+    await ensureFinanceLedgerSchema(pool);
+    const { accountId } = req.params;
+    const { dateFrom, dateTo } = req.query;
+
+    const [accounts] = await pool.query(
+      'SELECT id, account_name, bank_name, account_number, currency, opening_balance FROM bank_accounts WHERE id = ?',
+      [accountId]
+    );
+    if (accounts.length === 0) {
+      return res.status(404).json({ success: false, message: 'Bank account not found' });
+    }
+
+    const { transactions, totals } = await loadBankAccountTransactions(
+      pool,
+      accountId,
+      dateFrom || '',
+      dateTo || ''
+    );
+
+    res.json({
+      success: true,
+      account: accounts[0],
+      transactions,
+      totals,
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null,
+    });
+  } catch (error) {
+    console.error('Error fetching bank transactions:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch bank transactions' });
   }
 });
 
