@@ -85,6 +85,24 @@ const ensureProfilePictureColumn = async () => {
   }
 };
 
+const ensureFamilyPostalCodeColumn = async () => {
+  try {
+    await pool.query(`
+      ALTER TABLE student_family_details
+      ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20) NULL
+    `);
+  } catch (err) {
+    if (err.code === 'ER_DUP_FIELDNAME') return;
+    try {
+      await pool.query(`ALTER TABLE student_family_details ADD COLUMN postal_code VARCHAR(20) NULL`);
+    } catch (err2) {
+      if (err2.code !== 'ER_DUP_FIELDNAME') {
+        console.warn('student_family_details.postal_code column ensure:', err2.message);
+      }
+    }
+  }
+};
+
 const validateEmail = (email) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -373,6 +391,7 @@ router.get('/students/:studentId/lead-history', async (req, res) => {
 router.post('/students', async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    await ensureFamilyPostalCodeColumn();
     await connection.beginTransaction();
 
     const {
@@ -462,11 +481,11 @@ router.post('/students', async (req, res) => {
       for (const member of familyDetails) {
         if (member.type && (member.full_name || member.contact_no)) {
           await connection.query(
-            `INSERT INTO student_family_details (student_id, type, full_name, relation, contact_no, email, profession, address, sponsor_note)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO student_family_details (student_id, type, full_name, relation, contact_no, email, profession, address, postal_code, sponsor_note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [newStudentId, member.type, member.full_name || null, member.relation || null,
              member.contact_no || null, member.email || null, member.profession || null,
-             member.address || null, member.sponsor_note || null]
+             member.address || null, member.postal_code || null, member.sponsor_note || null]
           );
         }
       }
@@ -555,6 +574,7 @@ router.post('/students', async (req, res) => {
 router.put('/students/:studentId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    await ensureFamilyPostalCodeColumn();
     await connection.beginTransaction();
 
     const { studentId } = req.params;
@@ -651,11 +671,11 @@ router.put('/students/:studentId', async (req, res) => {
       for (const member of familyDetails) {
         if (member.type) {
           await connection.query(
-            `INSERT INTO student_family_details (student_id, type, full_name, relation, contact_no, email, profession, address, sponsor_note)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO student_family_details (student_id, type, full_name, relation, contact_no, email, profession, address, postal_code, sponsor_note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [studentId, member.type, member.full_name || null, member.relation || null,
              member.contact_no || null, member.email || null, member.profession || null,
-             member.address || null, member.sponsor_note || null]
+             member.address || null, member.postal_code || null, member.sponsor_note || null]
           );
         }
       }
