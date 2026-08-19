@@ -431,9 +431,6 @@ const buildFinanceOverview = async (db, dateFrom, dateTo) => {
   return { bankAccounts, cash, totals };
 };
 
-  return { bankAccounts, cash, totals };
-};
-
 const loadBankAccountTransactions = async (db, accountId, dateFrom, dateTo) => {
   const transactions = [];
   const accountKey = Number(accountId);
