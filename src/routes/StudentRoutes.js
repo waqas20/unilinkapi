@@ -143,6 +143,14 @@ const mapEducationRow = (edu) => [
   (edu.grade_cgpa ?? edu.result ?? edu.cgpa)?.trim() || null,
 ];
 
+const mapWorkRow = (work) => [
+  work.company_name?.trim() || null,
+  work.designation?.trim() || null,
+  normalizeEducationMonth(work.date_from),
+  normalizeEducationMonth(work.date_to),
+  work.employment_type?.trim() || null,
+];
+
 const generateStudentId = async (connection) => {
   const currentYear = new Date().getFullYear();
   const [result] = await connection.query(
@@ -551,13 +559,11 @@ router.post('/students', async (req, res) => {
 
     if (workExperience && Array.isArray(workExperience) && workExperience.length > 0) {
       const workValues = workExperience
-        .filter(w => w.company_name && w.designation)
-        .map(w => [newStudentId, w.company_name, w.designation,
-          w.date_from || null, w.date_to || null, w.duration || null,
-          w.employment_type || null, w.relation || null]);
+        .filter(w => w.company_name?.trim() && w.designation?.trim())
+        .map(w => [newStudentId, ...mapWorkRow(w)]);
       if (workValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_work_experience (student_id, company_name, designation, date_from, date_to, duration, employment_type, relation)
+          `INSERT INTO student_work_experience (student_id, company_name, designation, date_from, date_to, employment_type)
            VALUES ?`,
           [workValues]
         );
@@ -741,14 +747,11 @@ router.put('/students/:studentId', async (req, res) => {
     if (workExperience && Array.isArray(workExperience)) {
       await connection.query('DELETE FROM student_work_experience WHERE student_id = ?', [studentId]);
       const workValues = workExperience
-        .filter(w => w.company_name && w.designation)
-        .map(w => [studentId, w.company_name, w.designation,
-          w.date_from ? w.date_from.split('T')[0] : null,
-          w.date_to ? w.date_to.split('T')[0] : null,
-          w.duration || null, w.employment_type || null, w.relation || null]);
+        .filter(w => w.company_name?.trim() && w.designation?.trim())
+        .map(w => [studentId, ...mapWorkRow(w)]);
       if (workValues.length > 0) {
         await connection.query(
-          `INSERT INTO student_work_experience (student_id, company_name, designation, date_from, date_to, duration, employment_type, relation)
+          `INSERT INTO student_work_experience (student_id, company_name, designation, date_from, date_to, employment_type)
            VALUES ?`,
           [workValues]
         );
