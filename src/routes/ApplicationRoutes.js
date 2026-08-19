@@ -49,6 +49,134 @@ const upload = multer({
   }
 });
 
+const ensureColumn = async (table, column, definition) => {
+  try {
+    await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN IF NOT EXISTS \`${column}\` ${definition}`);
+  } catch (err) {
+    if (err.code === 'ER_DUP_FIELDNAME') return;
+    try {
+      await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    } catch (err2) {
+      if (err2.code !== 'ER_DUP_FIELDNAME') {
+        console.warn(`${table}.${column} column ensure:`, err2.message);
+      }
+    }
+  }
+};
+
+const ensureApplicationSchema = async () => {
+  await ensureColumn('applications', 'intake', 'VARCHAR(100) NULL');
+  await ensureColumn('applications', 'apps_submitted_through_other', 'VARCHAR(255) NULL');
+  await ensureColumn('applications', 'apps_tagged_through_other', 'VARCHAR(255) NULL');
+  await ensureColumn('applications', 'offer_letter_type', 'VARCHAR(100) NULL');
+  await ensureColumn('applications', 'offer_letter_other', 'VARCHAR(255) NULL');
+  await ensureColumn('applications', 'initial_deposit_status', 'VARCHAR(50) NULL');
+  await ensureColumn('applications', 'initial_deposit_amount', 'VARCHAR(100) NULL');
+  await ensureColumn('applications', 'enrollment_fee_status', 'VARCHAR(50) NULL');
+  await ensureColumn('applications', 'enrollment_fee_amount', 'VARCHAR(100) NULL');
+  await ensureColumn('applications', 'tuition_fee_status', 'VARCHAR(50) NULL');
+  await ensureColumn('applications', 'tuition_fee_amount', 'VARCHAR(100) NULL');
+
+  try {
+    await pool.query(`ALTER TABLE applications MODIFY COLUMN intake_id INT NULL`);
+  } catch (err) {
+    console.warn('applications.intake_id nullable:', err.message);
+  }
+  try {
+    await pool.query(`ALTER TABLE applications MODIFY COLUMN application_status VARCHAR(50) NOT NULL DEFAULT 'Pending'`);
+  } catch (err) {
+    console.warn('applications.application_status varchar:', err.message);
+  }
+  try {
+    await pool.query(`ALTER TABLE applications MODIFY COLUMN tagging_status VARCHAR(50) NULL`);
+  } catch (err) {
+    console.warn('applications.tagging_status varchar:', err.message);
+  }
+  try {
+    await pool.query(`ALTER TABLE applications MODIFY COLUMN university_fees VARCHAR(100) NULL`);
+  } catch (err) {
+    console.warn('applications.university_fees varchar:', err.message);
+  }
+  try {
+    await pool.query(`ALTER TABLE applications MODIFY COLUMN apps_submitted_through VARCHAR(100) NULL`);
+  } catch (err) {
+    console.warn('applications.apps_submitted_through varchar:', err.message);
+  }
+  try {
+    await pool.query(`ALTER TABLE applications MODIFY COLUMN apps_tagged_through VARCHAR(100) NULL`);
+  } catch (err) {
+    console.warn('applications.apps_tagged_through varchar:', err.message);
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS application_documents (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      application_id INT NOT NULL,
+      document_type VARCHAR(100) NOT NULL,
+      file_path VARCHAR(500) NOT NULL,
+      original_name VARCHAR(255) NULL,
+      uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_application_documents_app (application_id)
+    )
+  `);
+};
+
+const INTAKE_SELECT = `COALESCE(NULLIF(a.intake, ''), i.intake_name) as intake_name`;
+
+const normalizeTaggingStatus = (value) => {
+  if (value === 'Received' || value === 'Tagged') return 'Tagged';
+  return 'Not Tagged';
+};
+
+const paidAmount = (status, amount) =>
+  status === 'Paid' ? (amount?.toString().trim() || null) : null;
+
+const mapApplicationFields = (body) => {
+  const {
+    applicationDate, studentId, countryId, universityId,
+    intake, intakeOther, program,
+    appsSubmittedThrough, appsSubmittedThroughOther,
+    appsTaggedThrough, appsTaggedThroughOther,
+    universityFees, condition, applicationStatus, taggingStatus, remarks,
+    offerLetterType, offerLetterOther,
+    initialDepositStatus, initialDepositAmount,
+    enrollmentFeeStatus, enrollmentFeeAmount,
+    tuitionFeeStatus, tuitionFeeAmount,
+  } = body;
+
+  const intakeValue = intake === 'Other'
+    ? (intakeOther?.trim() ? `Other: ${intakeOther.trim()}` : 'Other')
+    : (intake?.trim() || null);
+
+  const accepted = applicationStatus === 'Accepted';
+
+  return {
+    applicationDate,
+    studentId,
+    countryId,
+    universityId,
+    intakeValue,
+    program: program?.trim(),
+    appsSubmittedThrough: appsSubmittedThrough?.trim() || null,
+    appsSubmittedThroughOther: appsSubmittedThrough === 'Other' ? (appsSubmittedThroughOther?.trim() || null) : null,
+    appsTaggedThrough: appsTaggedThrough?.trim() || null,
+    appsTaggedThroughOther: appsTaggedThrough === 'Other' ? (appsTaggedThroughOther?.trim() || null) : null,
+    universityFees: universityFees?.toString().trim() || null,
+    condition: condition?.trim() || null,
+    applicationStatus: applicationStatus || 'Pending',
+    taggingStatus: normalizeTaggingStatus(taggingStatus),
+    remarks: remarks?.trim() || null,
+    offerLetterType: accepted ? (offerLetterType?.trim() || null) : null,
+    offerLetterOther: accepted && offerLetterType === 'Other' ? (offerLetterOther?.trim() || null) : null,
+    initialDepositStatus: initialDepositStatus || null,
+    initialDepositAmount: paidAmount(initialDepositStatus, initialDepositAmount),
+    enrollmentFeeStatus: enrollmentFeeStatus || null,
+    enrollmentFeeAmount: paidAmount(enrollmentFeeStatus, enrollmentFeeAmount),
+    tuitionFeeStatus: tuitionFeeStatus || null,
+    tuitionFeeAmount: paidAmount(tuitionFeeStatus, tuitionFeeAmount),
+  };
+};
+
 // Generate application ID
 const generateApplicationId = async (connection) => {
   const currentYear = new Date().getFullYear();
@@ -67,13 +195,14 @@ const generateApplicationId = async (connection) => {
 // ============================================================
 router.get('/applications', async (req, res) => {
   try {
+    await ensureApplicationSchema();
     const [applications] = await pool.query(
       `SELECT a.*,
               u.name as student_name,
               u.student_id as student_number,
               c.country_name,
               un.university_name,
-              i.intake_name
+              ${INTAKE_SELECT}
        FROM applications a
        INNER JOIN users u ON a.student_id = u.id
        INNER JOIN countries c ON a.country_id = c.id
@@ -99,6 +228,7 @@ router.get('/applications/stats/overview', async (req, res) => {
       `SELECT 
         COUNT(*) as total_applications,
         SUM(CASE WHEN application_status = 'Pending'   THEN 1 ELSE 0 END) as pending_applications,
+        SUM(CASE WHEN application_status = 'In Progress' THEN 1 ELSE 0 END) as in_progress_applications,
         SUM(CASE WHEN application_status = 'Approved'  THEN 1 ELSE 0 END) as approved_applications,
         SUM(CASE WHEN application_status = 'Accepted'  THEN 1 ELSE 0 END) as accepted_applications,
         SUM(CASE WHEN application_status = 'Withdrawn' THEN 1 ELSE 0 END) as withdrawn_applications,
@@ -121,6 +251,7 @@ router.get('/applications/stats/overview', async (req, res) => {
 // ============================================================
 router.get('/applications/:applicationId', async (req, res) => {
   try {
+    await ensureApplicationSchema();
     const { applicationId } = req.params;
     const [applications] = await pool.query(
       `SELECT a.*,
@@ -130,7 +261,7 @@ router.get('/applications/:applicationId', async (req, res) => {
               u.mobile as student_mobile,
               c.country_name,
               un.university_name,
-              i.intake_name
+              ${INTAKE_SELECT}
        FROM applications a
        INNER JOIN users u ON a.student_id = u.id
        INNER JOIN countries c ON a.country_id = c.id
@@ -153,9 +284,10 @@ router.get('/applications/:applicationId', async (req, res) => {
 // ============================================================
 router.get('/applications/student/:studentId', async (req, res) => {
   try {
+    await ensureApplicationSchema();
     const { studentId } = req.params;
     const [applications] = await pool.query(
-      `SELECT a.*, c.country_name, un.university_name, i.intake_name
+      `SELECT a.*, c.country_name, un.university_name, ${INTAKE_SELECT}
        FROM applications a
        INNER JOIN countries c ON a.country_id = c.id
        LEFT JOIN universities un ON a.university_id = un.id
@@ -179,18 +311,15 @@ router.get('/applications/student/:studentId', async (req, res) => {
 router.post('/applications', async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    await ensureApplicationSchema();
     await connection.beginTransaction();
 
-    const {
-      applicationDate, studentId, countryId, universityId, intakeId,
-      program, appsSubmittedThrough, appsTaggedThrough, universityFees,
-      withdrawn, condition, firm, insurance, finalChoice,
-      depositPaid, applicationStatus, taggingStatus, remarks
-    } = req.body;
+    const fields = mapApplicationFields(req.body);
+    const { applicationDate, studentId, countryId, universityId, program } = fields;
 
-    if (!applicationDate || !studentId || !countryId || !universityId || !intakeId || !program) {
+    if (!applicationDate || !studentId || !countryId || !universityId || !program) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Application date, student, country, university, intake, and program are required' });
+      return res.status(400).json({ success: false, message: 'Application date, student, country, university, and program are required' });
     }
 
     const [student] = await connection.query('SELECT id, name FROM users WHERE id = ? AND role = ?', [studentId, 'client']);
@@ -202,27 +331,30 @@ router.post('/applications', async (req, res) => {
     const [university] = await connection.query('SELECT id FROM universities WHERE id = ? AND country_id = ?', [universityId, countryId]);
     if (university.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'University not found or does not belong to selected country' }); }
 
-    const [intake] = await connection.query('SELECT id FROM intakes WHERE id = ? AND university_id = ?', [intakeId, universityId]);
-    if (intake.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Intake not found or does not belong to selected university' }); }
-
     const applicationId = await generateApplicationId(connection);
 
     const [result] = await connection.query(
       `INSERT INTO applications 
        (application_id, application_date, student_id, student_name, country_id,
-        university_id, intake_id, program, apps_submitted_through, apps_tagged_through,
-        university_fees, withdrawn, \`condition\`, firm, insurance,
-        final_choice, deposit_paid, application_status, tagging_status, remarks)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        university_id, intake, program, apps_submitted_through, apps_submitted_through_other,
+        apps_tagged_through, apps_tagged_through_other, university_fees,
+        \`condition\`, application_status, tagging_status, remarks,
+        offer_letter_type, offer_letter_other,
+        initial_deposit_status, initial_deposit_amount,
+        enrollment_fee_status, enrollment_fee_amount,
+        tuition_fee_status, tuition_fee_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         applicationId, applicationDate, studentId, student[0].name, countryId,
-        universityId, intakeId, program.trim(),
-        appsSubmittedThrough?.trim() || null, appsTaggedThrough?.trim() || null,
-        universityFees || null,
-        withdrawn || 'No', condition?.trim() || null, firm?.trim() || null,
-        insurance?.trim() || null, finalChoice?.trim() || null,
-        depositPaid || 'No', applicationStatus || 'Pending',
-        taggingStatus || 'Not Received', remarks?.trim() || null
+        universityId, fields.intakeValue, program,
+        fields.appsSubmittedThrough, fields.appsSubmittedThroughOther,
+        fields.appsTaggedThrough, fields.appsTaggedThroughOther,
+        fields.universityFees, fields.condition, fields.applicationStatus,
+        fields.taggingStatus, fields.remarks,
+        fields.offerLetterType, fields.offerLetterOther,
+        fields.initialDepositStatus, fields.initialDepositAmount,
+        fields.enrollmentFeeStatus, fields.enrollmentFeeAmount,
+        fields.tuitionFeeStatus, fields.tuitionFeeAmount,
       ]
     );
 
@@ -241,24 +373,20 @@ router.post('/applications', async (req, res) => {
 
 // ============================================================
 // PUT /applications/:applicationId — Update application
-// CHANGED: Removed acceptedRejected field
 // ============================================================
 router.put('/applications/:applicationId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    await ensureApplicationSchema();
     await connection.beginTransaction();
 
     const { applicationId } = req.params;
-    const {
-      applicationDate, studentId, countryId, universityId, intakeId,
-      program, appsSubmittedThrough, appsTaggedThrough, universityFees,
-      withdrawn, condition, firm, insurance, finalChoice,
-      depositPaid, applicationStatus, taggingStatus, remarks
-    } = req.body;
+    const fields = mapApplicationFields(req.body);
+    const { applicationDate, studentId, countryId, universityId, program } = fields;
 
-    if (!applicationDate || !studentId || !countryId || !universityId || !intakeId || !program) {
+    if (!applicationDate || !studentId || !countryId || !universityId || !program) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Application date, student, country, university, intake, and program are required' });
+      return res.status(400).json({ success: false, message: 'Application date, student, country, university, and program are required' });
     }
 
     const [existing] = await connection.query('SELECT id FROM applications WHERE id = ?', [applicationId]);
@@ -273,26 +401,29 @@ router.put('/applications/:applicationId', async (req, res) => {
     const [university] = await connection.query('SELECT id FROM universities WHERE id = ? AND country_id = ?', [universityId, countryId]);
     if (university.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'University not found or does not belong to selected country' }); }
 
-    const [intake] = await connection.query('SELECT id FROM intakes WHERE id = ? AND university_id = ?', [intakeId, universityId]);
-    if (intake.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Intake not found or does not belong to selected university' }); }
-
     await connection.query(
       `UPDATE applications 
        SET application_date = ?, student_id = ?, student_name = ?, country_id = ?,
-           university_id = ?, intake_id = ?, program = ?, apps_submitted_through = ?,
-           apps_tagged_through = ?, university_fees = ?, withdrawn = ?,
-           \`condition\` = ?, firm = ?, insurance = ?, final_choice = ?,
-           deposit_paid = ?, application_status = ?, tagging_status = ?, remarks = ?
+           university_id = ?, intake_id = NULL, intake = ?, program = ?,
+           apps_submitted_through = ?, apps_submitted_through_other = ?,
+           apps_tagged_through = ?, apps_tagged_through_other = ?,
+           university_fees = ?, \`condition\` = ?, application_status = ?, tagging_status = ?, remarks = ?,
+           offer_letter_type = ?, offer_letter_other = ?,
+           initial_deposit_status = ?, initial_deposit_amount = ?,
+           enrollment_fee_status = ?, enrollment_fee_amount = ?,
+           tuition_fee_status = ?, tuition_fee_amount = ?
        WHERE id = ?`,
       [
-        applicationDate.split('T')[0], studentId, student[0].name, countryId,
-        universityId, intakeId, program.trim(),
-        appsSubmittedThrough?.trim() || null, appsTaggedThrough?.trim() || null,
-        universityFees || null,
-        withdrawn || 'No', condition?.trim() || null, firm?.trim() || null,
-        insurance?.trim() || null, finalChoice?.trim() || null,
-        depositPaid || 'No', applicationStatus || 'Pending',
-        taggingStatus || 'Not Received', remarks?.trim() || null,
+        String(applicationDate).split('T')[0], studentId, student[0].name, countryId,
+        universityId, fields.intakeValue, program,
+        fields.appsSubmittedThrough, fields.appsSubmittedThroughOther,
+        fields.appsTaggedThrough, fields.appsTaggedThroughOther,
+        fields.universityFees, fields.condition, fields.applicationStatus,
+        fields.taggingStatus, fields.remarks,
+        fields.offerLetterType, fields.offerLetterOther,
+        fields.initialDepositStatus, fields.initialDepositAmount,
+        fields.enrollmentFeeStatus, fields.enrollmentFeeAmount,
+        fields.tuitionFeeStatus, fields.tuitionFeeAmount,
         applicationId
       ]
     );
@@ -312,7 +443,6 @@ router.put('/applications/:applicationId', async (req, res) => {
 
 // ============================================================
 // DELETE /applications/:applicationId
-// CHANGED: Also deletes offer_letter_path file
 // ============================================================
 router.delete('/applications/:applicationId', async (req, res) => {
   const connection = await pool.getConnection();
@@ -335,6 +465,14 @@ router.delete('/applications/:applicationId', async (req, res) => {
 
     deleteFile(existing[0].manual_form_path);
     deleteFile(existing[0].offer_letter_path);
+
+    try {
+      const [docs] = await connection.query('SELECT file_path FROM application_documents WHERE application_id = ?', [applicationId]);
+      docs.forEach((doc) => deleteFile(doc.file_path));
+      await connection.query('DELETE FROM application_documents WHERE application_id = ?', [applicationId]);
+    } catch (err) {
+      console.warn('application_documents cleanup:', err.message);
+    }
 
     await connection.query('DELETE FROM applications WHERE id = ?', [applicationId]);
     await connection.commit();
@@ -530,9 +668,99 @@ router.delete('/applications/:applicationId/offer-letter', async (req, res) => {
 });
 
 
-// ============================================================
-// Dashboard routes (unchanged)
-// ============================================================
+router.post('/applications/:applicationId/documents', upload.single('document'), async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await ensureApplicationSchema();
+    await connection.beginTransaction();
+    const { applicationId } = req.params;
+    const documentType = (req.body.documentType || '').trim();
+
+    if (!req.file) { await connection.rollback(); return res.status(400).json({ success: false, message: 'No file uploaded' }); }
+    if (!documentType) {
+      await connection.rollback();
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ success: false, message: 'Document type is required' });
+    }
+
+    const [application] = await connection.query('SELECT id FROM applications WHERE id = ?', [applicationId]);
+    if (application.length === 0) {
+      await connection.rollback();
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({ success: false, message: 'Application not found' });
+    }
+
+    const filePath = `/uploads/application-forms/${req.file.filename}`;
+    const [result] = await connection.query(
+      `INSERT INTO application_documents (application_id, document_type, file_path, original_name)
+       VALUES (?, ?, ?, ?)`,
+      [applicationId, documentType, filePath, req.file.originalname]
+    );
+
+    await connection.commit();
+    res.json({
+      success: true,
+      message: 'Document uploaded successfully',
+      document: {
+        id: result.insertId,
+        document_type: documentType,
+        file_path: filePath,
+        original_name: req.file.originalname,
+        uploaded_at: new Date(),
+      }
+    });
+  } catch (error) {
+    await connection.rollback();
+    if (req.file) fs.unlinkSync(req.file.path);
+    console.error('Error uploading application document:', error);
+    res.status(500).json({ success: false, message: 'Failed to upload document' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.get('/applications/:applicationId/documents', async (req, res) => {
+  try {
+    await ensureApplicationSchema();
+    const { applicationId } = req.params;
+    const [documents] = await pool.query(
+      'SELECT * FROM application_documents WHERE application_id = ? ORDER BY uploaded_at DESC',
+      [applicationId]
+    );
+    res.json({ success: true, documents });
+  } catch (error) {
+    console.error('Error fetching application documents:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch documents' });
+  }
+});
+
+router.delete('/applications/:applicationId/documents/:documentId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { applicationId, documentId } = req.params;
+    const [docs] = await connection.query(
+      'SELECT * FROM application_documents WHERE id = ? AND application_id = ?',
+      [documentId, applicationId]
+    );
+    if (docs.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Document not found' });
+    }
+    const full = path.join(__dirname, '..', docs[0].file_path);
+    if (fs.existsSync(full)) fs.unlinkSync(full);
+    await connection.query('DELETE FROM application_documents WHERE id = ?', [documentId]);
+    await connection.commit();
+    res.json({ success: true, message: 'Document deleted successfully' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting application document:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete document' });
+  } finally {
+    connection.release();
+  }
+});
+
 router.get('/dashboard/stats', async (req, res) => {
   try {
     const [leadStats] = await pool.query(`SELECT COUNT(*) as total_leads FROM leads`);

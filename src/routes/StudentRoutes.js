@@ -1386,7 +1386,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
         await connection.query(
           `INSERT INTO applications 
            (application_id, application_date, student_id, student_name, country_id, university_id, application_status, tagging_status)
-           VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
+           VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Not Tagged')`,
           [applicationId, currentDate, studentId, student[0].name, uni.country_id, universityId]
         );
         createdCount++;
@@ -1418,7 +1418,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
         await connection.query(
           `INSERT INTO applications 
            (application_id, application_date, student_id, student_name, country_id, application_status, tagging_status)
-           VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Received')`,
+           VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Tagged')`,
           [applicationId, currentDate, studentId, student[0].name, countryId]
         );
         createdCount++;
