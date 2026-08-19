@@ -103,6 +103,59 @@ const ensureFamilyPostalCodeColumn = async () => {
   }
 };
 
+const ensureColumn = async (table, column, definition) => {
+  try {
+    await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN IF NOT EXISTS \`${column}\` ${definition}`);
+  } catch (err) {
+    if (err.code === 'ER_DUP_FIELDNAME') return;
+    try {
+      await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
+    } catch (err2) {
+      if (err2.code !== 'ER_DUP_FIELDNAME') {
+        console.warn(`${table}.${column} column ensure:`, err2.message);
+      }
+    }
+  }
+};
+
+const ensureIntendedProgramSchema = async () => {
+  await ensureColumn('users', 'intake_session', 'VARCHAR(50) NULL');
+  await ensureColumn('users', 'intake_year', 'VARCHAR(10) NULL');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS student_intended_programs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      student_id INT NOT NULL,
+      country_id INT NULL,
+      university_id INT NULL,
+      program_name VARCHAR(255) NULL,
+      study_mode VARCHAR(50) NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_student_intended_programs_student (student_id)
+    )
+  `);
+};
+
+const saveIntendedPrograms = async (connection, studentId, intendedPrograms) => {
+  if (!Array.isArray(intendedPrograms)) return;
+  await connection.query('DELETE FROM student_intended_programs WHERE student_id = ?', [studentId]);
+  const rows = intendedPrograms.filter(p =>
+    p.country_id || p.university_id || (p.program_name && String(p.program_name).trim())
+  );
+  for (const p of rows) {
+    await connection.query(
+      `INSERT INTO student_intended_programs (student_id, country_id, university_id, program_name, study_mode)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        studentId,
+        p.country_id || null,
+        p.university_id || null,
+        p.program_name?.trim() || null,
+        p.study_mode?.trim() || null,
+      ]
+    );
+  }
+};
+
 const validateEmail = (email) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -232,6 +285,7 @@ router.get('/students/:studentId/credentials', async (req, res) => {
 // Get single student by ID with all details
 router.get('/students/:studentId', async (req, res) => {
   try {
+    await ensureIntendedProgramSchema();
     const { studentId } = req.params;
 
     const [students] = await pool.query(
@@ -295,6 +349,18 @@ router.get('/students/:studentId', async (req, res) => {
       [studentId]
     );
 
+    let intendedPrograms = [];
+    try {
+      await ensureIntendedProgramSchema();
+      const [programRows] = await pool.query(
+        'SELECT * FROM student_intended_programs WHERE student_id = ? ORDER BY id ASC',
+        [studentId]
+      );
+      intendedPrograms = programRows;
+    } catch (err) {
+      console.warn('Intended programs fetch:', err.message);
+    }
+
     res.json({
       success: true,
       student: students[0],
@@ -306,7 +372,8 @@ router.get('/students/:studentId', async (req, res) => {
       emergencyContact: emergencyContacts[0] || null,
       familyDetails,
       activities,
-      awards
+      awards,
+      intendedPrograms
     });
 
   } catch (error) {
@@ -417,6 +484,7 @@ router.post('/students', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await ensureFamilyPostalCodeColumn();
+    await ensureIntendedProgramSchema();
     await connection.beginTransaction();
 
     const {
@@ -428,7 +496,8 @@ router.post('/students', async (req, res) => {
       guardianName, guardianRelation, guardianMobile, guardianEmail,
       sourceInquiry, course, status,
       emergencyContact, familyDetails,
-      education, workExperience, activities, awards
+      education, workExperience, activities, awards,
+      intendedPrograms, intakeSession, intakeYear
     } = req.body;
 
     if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
@@ -468,8 +537,8 @@ router.post('/students', async (req, res) => {
        address, postal_code, country, dob, nationality, marital_status, gender,
        city_of_birth, country_of_birth, passport_no, passport_issue_date, passport_place_of_issue,
        guardian_name, guardian_relation, guardian_mobile, guardian_email,
-       source_inquiry, course, password, plain_password, role, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       source_inquiry, course, intake_session, intake_year, password, plain_password, role, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId, firstName.trim(), middleName?.trim() || null, surname.trim(),
         trimmedEmail, alternativeEmail?.trim() || null,
@@ -484,6 +553,7 @@ router.post('/students', async (req, res) => {
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, course?.trim() || null,
+        intakeSession?.trim() || null, intakeYear ? String(intakeYear).trim() : null,
         hashedPassword,
         generatedPassword,
         studentStatus
@@ -570,6 +640,8 @@ router.post('/students', async (req, res) => {
       }
     }
 
+    await saveIntendedPrograms(connection, newStudentId, intendedPrograms);
+
     await connection.commit();
 
     res.status(201).json({
@@ -594,6 +666,7 @@ router.put('/students/:studentId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
     await ensureFamilyPostalCodeColumn();
+    await ensureIntendedProgramSchema();
     await connection.beginTransaction();
 
     const { studentId } = req.params;
@@ -606,7 +679,8 @@ router.put('/students/:studentId', async (req, res) => {
       guardianName, guardianRelation, guardianMobile, guardianEmail,
       sourceInquiry, status, course,
       emergencyContact, familyDetails,
-      education, workExperience, activities, awards
+      education, workExperience, activities, awards,
+      intendedPrograms, intakeSession, intakeYear
     } = req.body;
 
     if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
@@ -641,7 +715,7 @@ router.put('/students/:studentId', async (req, res) => {
         city_of_birth = ?, country_of_birth = ?,
         passport_no = ?, passport_issue_date = ?, passport_place_of_issue = ?,
         guardian_name = ?, guardian_relation = ?, guardian_mobile = ?, guardian_email = ?,
-        source_inquiry = ?, status = ?, course = ?
+        source_inquiry = ?, status = ?, course = ?, intake_session = ?, intake_year = ?
       WHERE id = ?`,
       [
         firstName.trim(), middleName?.trim() || null, surname.trim(),
@@ -657,6 +731,7 @@ router.put('/students/:studentId', async (req, res) => {
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, status || 'Active', course?.trim() || null,
+        intakeSession?.trim() || null, intakeYear ? String(intakeYear).trim() : null,
         studentId
       ]
     );
@@ -757,6 +832,8 @@ router.put('/students/:studentId', async (req, res) => {
         );
       }
     }
+
+    await saveIntendedPrograms(connection, studentId, intendedPrograms);
 
     await connection.commit();
     res.json({ success: true, message: 'Student updated successfully' });
