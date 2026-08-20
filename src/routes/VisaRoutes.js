@@ -88,6 +88,23 @@ const ensureVisaSchema = async () => {
     console.warn('visas.student_id nullable:', err.message);
   }
 
+  // Expand legacy ENUM columns to VARCHAR so new status/type values are accepted
+  try {
+    await pool.query(
+      "ALTER TABLE visas MODIFY visa_status VARCHAR(50) NOT NULL DEFAULT 'In Progress'"
+    );
+  } catch (err) {
+    console.warn('visas.visa_status:', err.message);
+  }
+
+  try {
+    await pool.query(
+      "ALTER TABLE visas MODIFY visa_type VARCHAR(50) NOT NULL DEFAULT 'Study Visa'"
+    );
+  } catch (err) {
+    console.warn('visas.visa_type:', err.message);
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS visa_documents (
       id INT AUTO_INCREMENT PRIMARY KEY,
