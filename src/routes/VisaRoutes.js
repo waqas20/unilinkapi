@@ -51,6 +51,69 @@ const upload = multer({
   }
 });
 
+const ensureVisaSchema = async () => {
+  const newColumns = [
+    ['applicant_name', 'VARCHAR(255) NULL'],
+    ['applicant_email', 'VARCHAR(255) NULL'],
+    ['applicant_phone', 'VARCHAR(50) NULL'],
+    ['country_id', 'INT NULL'],
+    ['main_applicant_name', 'VARCHAR(255) NULL'],
+    ['main_applicant_relation', 'VARCHAR(100) NULL'],
+    ['main_applicant_institute', 'VARCHAR(255) NULL'],
+    ['main_applicant_visa_category', 'VARCHAR(255) NULL'],
+    ['main_applicant_visa_status', 'VARCHAR(100) NULL'],
+    ['visa_category', 'VARCHAR(255) NULL'],
+    ['biometrics', 'VARCHAR(50) NULL'],
+    ['biometrics_appointment_date', 'DATE NULL'],
+    ['medical_test', 'VARCHAR(255) NULL'],
+    ['medical_booked', 'VARCHAR(50) NULL'],
+    ['medical_appointment_date', 'DATE NULL'],
+    ['accommodation_booked', 'VARCHAR(10) NULL'],
+    ['visa_website_id', 'VARCHAR(255) NULL'],
+  ];
+
+  for (const [col, def] of newColumns) {
+    try {
+      await pool.query(`ALTER TABLE visas ADD COLUMN ${col} ${def}`);
+    } catch (err) {
+      if (!String(err.message).includes('Duplicate column')) {
+        console.warn(`visas.${col}:`, err.message);
+      }
+    }
+  }
+
+  try {
+    await pool.query('ALTER TABLE visas MODIFY student_id INT NULL');
+  } catch (err) {
+    console.warn('visas.student_id nullable:', err.message);
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS visa_documents (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      visa_id INT NOT NULL,
+      document_type VARCHAR(100) NOT NULL,
+      file_path VARCHAR(500) NOT NULL,
+      original_name VARCHAR(255) NULL,
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_visa_documents_visa (visa_id)
+    )
+  `);
+};
+
+const visaListSelect = `
+  SELECT v.*,
+         COALESCE(v.applicant_name, u.name) AS student_name,
+         COALESCE(v.applicant_email, u.email) AS student_email,
+         COALESCE(v.applicant_phone, u.mobile) AS student_mobile,
+         u.student_id,
+         c.country_name AS student_country,
+         c.country_name AS country_name
+  FROM visas v
+  LEFT JOIN users u ON v.student_id = u.id
+  LEFT JOIN countries c ON v.country_id = c.id
+`;
+
 // Generate visa ID
 const generateVisaId = async (connection) => {
   const currentYear = new Date().getFullYear();
@@ -70,39 +133,17 @@ const generateVisaId = async (connection) => {
 // ============================================================
 router.get('/visas', async (req, res) => {
   try {
+    await ensureVisaSchema();
     const [visas] = await pool.query(
-      `SELECT v.*,
-              v.institute,
-              v.submission_date,
-              v.submitted_by,
-              u.name as student_name,
-              u.student_id,
-              u.email as student_email,
-              u.mobile as student_mobile,
-              u.country as student_country
-       FROM visas v
-       INNER JOIN users u ON v.student_id = u.id
-       WHERE u.role = 'client'
-       ORDER BY v.created_at DESC`
+      `${visaListSelect} ORDER BY v.created_at DESC`
     );
 
-    // Get document counts for each visa
-    for (let visa of visas) {
-      const [feeReceipts] = await pool.query(
-        'SELECT COUNT(*) as count FROM visa_fee_receipts WHERE visa_id = ?',
+    for (const visa of visas) {
+      const [docCount] = await pool.query(
+        'SELECT COUNT(*) AS count FROM visa_documents WHERE visa_id = ?',
         [visa.id]
       );
-      const [financialDocs] = await pool.query(
-        'SELECT COUNT(*) as count FROM visa_financial_documents WHERE visa_id = ?',
-        [visa.id]
-      );
-      const [photos] = await pool.query(
-        'SELECT COUNT(*) as count FROM visa_passport_photos WHERE visa_id = ?',
-        [visa.id]
-      );
-      visa.fee_receipts_count = feeReceipts[0].count;
-      visa.financial_docs_count = financialDocs[0].count;
-      visa.passport_photos_count = photos[0].count;
+      visa.documents_count = docCount[0].count;
     }
 
     res.json({ success: true, visas, total: visas.length });
@@ -124,16 +165,18 @@ router.get('/visas', async (req, res) => {
 // ============================================================
 router.get('/visas/statistics', async (req, res) => {
   try {
+    await ensureVisaSchema();
     const [stats] = await pool.query(`
       SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN visa_status = 'To be applied' THEN 1 ELSE 0 END) as to_be_applied,
-        SUM(CASE WHEN visa_status = 'In Progress'   THEN 1 ELSE 0 END) as in_progress,
-        SUM(CASE WHEN visa_status = 'Approved'      THEN 1 ELSE 0 END) as approved,
-        SUM(CASE WHEN visa_status = 'Rejected'      THEN 1 ELSE 0 END) as rejected,
+        COUNT(*) AS total,
+        SUM(CASE WHEN visa_status IN ('In Progress', 'To be applied') THEN 1 ELSE 0 END) AS in_progress,
+        SUM(CASE WHEN visa_status = 'Applied' THEN 1 ELSE 0 END) AS applied,
+        SUM(CASE WHEN visa_status = 'Approved' THEN 1 ELSE 0 END) AS approved,
+        SUM(CASE WHEN visa_status = 'Rejected' THEN 1 ELSE 0 END) AS rejected,
+        SUM(CASE WHEN visa_status = 'Reapplied' THEN 1 ELSE 0 END) AS reapplied,
         SUM(CASE WHEN visa_appointment_date >= CURDATE() 
                   AND visa_appointment_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)
-             THEN 1 ELSE 0 END) as upcoming_appointments
+             THEN 1 ELSE 0 END) AS upcoming_appointments
       FROM visas
     `);
 
@@ -156,23 +199,11 @@ router.get('/visas/statistics', async (req, res) => {
 // ============================================================
 router.get('/visas/:visaId', async (req, res) => {
   try {
+    await ensureVisaSchema();
     const { visaId } = req.params;
 
     const [visas] = await pool.query(
-      `SELECT v.*,
-              v.institute,
-              v.submission_date,
-              v.submitted_by,
-              u.name as student_name,
-              u.student_id,
-              u.email as student_email,
-              u.mobile as student_mobile,
-              u.address as student_address,
-              u.country as student_country,
-              u.dob as student_dob
-       FROM visas v
-       INNER JOIN users u ON v.student_id = u.id
-       WHERE v.id = ?`,
+      `${visaListSelect} WHERE v.id = ?`,
       [visaId]
     );
 
@@ -180,25 +211,15 @@ router.get('/visas/:visaId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Visa not found' });
     }
 
-    const [feeReceipts] = await pool.query(
-      'SELECT * FROM visa_fee_receipts WHERE visa_id = ? ORDER BY uploaded_at DESC',
-      [visaId]
-    );
-    const [financialDocs] = await pool.query(
-      'SELECT * FROM visa_financial_documents WHERE visa_id = ? ORDER BY uploaded_at DESC',
-      [visaId]
-    );
-    const [passportPhotos] = await pool.query(
-      'SELECT * FROM visa_passport_photos WHERE visa_id = ? ORDER BY uploaded_at DESC',
+    const [documents] = await pool.query(
+      'SELECT * FROM visa_documents WHERE visa_id = ? ORDER BY uploaded_at DESC',
       [visaId]
     );
 
     res.json({
       success: true,
       visa: visas[0],
-      feeReceipts,
-      financialDocuments: financialDocs,
-      passportPhotos
+      documents,
     });
 
   } catch (error) {
@@ -220,75 +241,85 @@ router.post('/visas', async (req, res) => {
   const connection = await pool.getConnection();
 
   try {
+    await ensureVisaSchema();
     await connection.beginTransaction();
 
     const {
-      studentId,
+      applicantName,
+      applicantEmail,
+      applicantPhone,
+      countryId,
       visaNumber,
       visaType,
       visaStatus,
-      institute,        // NEW
-      submissionDate,   // NEW
-      submittedBy,      // NEW
-      unconditionalOffer,
-      visaLetter,
-      accommodation,
-      tbCertificate,
-      affidavit,
-      financialDocuments,
+      mainApplicantName,
+      mainApplicantRelation,
+      mainApplicantInstitute,
+      mainApplicantVisaCategory,
+      mainApplicantVisaStatus,
+      visaCategory,
+      institute,
+      submissionDate,
+      submittedBy,
+      biometrics,
+      biometricsAppointmentDate,
+      medicalTest,
+      medicalBooked,
+      medicalAppointmentDate,
+      accommodationBooked,
       visaLink,
+      visaWebsiteId,
       visaPassword,
       visaAppointmentDate,
-      visaOutcome
     } = req.body;
 
-    if (!studentId || !visaType || !visaStatus) {
+    if (!applicantName || !countryId || !visaType || !visaStatus) {
       await connection.rollback();
       return res.status(400).json({
         success: false,
-        message: 'Student ID, visa type, and visa status are required'
+        message: 'Student name, country, visa type, and visa status are required',
       });
     }
 
-    const [student] = await connection.query(
-      'SELECT id, name, student_id FROM users WHERE id = ? AND role = ?',
-      [studentId, 'client']
-    );
-
-    if (student.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Student not found' });
-    }
-
-    const visaId = await generateVisaId(connection);
+    const visaIdCode = await generateVisaId(connection);
 
     const [result] = await connection.query(
       `INSERT INTO visas 
-       (visa_id, student_id, visa_number, visa_type, visa_status,
-        institute, submission_date, submitted_by,
-        unconditional_offer, visa_letter, accommodation, tb_certificate,
-        affidavit, financial_documents, visa_link, visa_password,
-        visa_appointment_date, visa_outcome)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (visa_id, student_id, applicant_name, applicant_email, applicant_phone, country_id,
+        visa_number, visa_type, visa_status, main_applicant_name, main_applicant_relation,
+        main_applicant_institute, main_applicant_visa_category, main_applicant_visa_status,
+        visa_category, institute, submission_date, submitted_by, biometrics,
+        biometrics_appointment_date, medical_test, medical_booked, medical_appointment_date,
+        accommodation_booked, visa_link, visa_website_id, visa_password, visa_appointment_date)
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        visaId,
-        studentId,
+        visaIdCode,
+        applicantName,
+        applicantEmail || null,
+        applicantPhone || null,
+        countryId,
         visaNumber || null,
         visaType,
         visaStatus,
-        institute || null,        // NEW
-        submissionDate || null,   // NEW
-        submittedBy || null,      // NEW
-        unconditionalOffer || 'NO',
-        visaLetter || 'NO',
-        accommodation || null,
-        tbCertificate || 'NO',
-        affidavit || 'NO',
-        financialDocuments || 'NO',
+        mainApplicantName || null,
+        mainApplicantRelation || null,
+        mainApplicantInstitute || null,
+        mainApplicantVisaCategory || null,
+        mainApplicantVisaStatus || null,
+        visaCategory || null,
+        institute || null,
+        submissionDate || null,
+        submittedBy || null,
+        biometrics || null,
+        biometricsAppointmentDate || null,
+        medicalTest || null,
+        medicalBooked || null,
+        medicalAppointmentDate || null,
+        accommodationBooked || null,
         visaLink || null,
+        visaWebsiteId || null,
         visaPassword || null,
         visaAppointmentDate || null,
-        visaOutcome || null
       ]
     );
 
@@ -298,7 +329,7 @@ router.post('/visas', async (req, res) => {
       success: true,
       message: 'Visa created successfully',
       visaId: result.insertId,
-      generatedVisaId: visaId
+      generatedVisaId: visaIdCode,
     });
 
   } catch (error) {
@@ -323,26 +354,37 @@ router.put('/visas/:visaId', async (req, res) => {
   const connection = await pool.getConnection();
 
   try {
+    await ensureVisaSchema();
     await connection.beginTransaction();
 
     const { visaId } = req.params;
     const {
+      applicantName,
+      applicantEmail,
+      applicantPhone,
+      countryId,
       visaNumber,
       visaType,
       visaStatus,
-      institute,        // NEW
-      submissionDate,   // NEW
-      submittedBy,      // NEW
-      unconditionalOffer,
-      visaLetter,
-      accommodation,
-      tbCertificate,
-      affidavit,
-      financialDocuments,
+      mainApplicantName,
+      mainApplicantRelation,
+      mainApplicantInstitute,
+      mainApplicantVisaCategory,
+      mainApplicantVisaStatus,
+      visaCategory,
+      institute,
+      submissionDate,
+      submittedBy,
+      biometrics,
+      biometricsAppointmentDate,
+      medicalTest,
+      medicalBooked,
+      medicalAppointmentDate,
+      accommodationBooked,
       visaLink,
+      visaWebsiteId,
       visaPassword,
       visaAppointmentDate,
-      visaOutcome
     } = req.body;
 
     const [existing] = await connection.query(
@@ -355,33 +397,55 @@ router.put('/visas/:visaId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Visa not found' });
     }
 
+    if (!applicantName || !countryId || !visaType || !visaStatus) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Student name, country, visa type, and visa status are required',
+      });
+    }
+
     await connection.query(
-      `UPDATE visas 
-       SET visa_number = ?, visa_type = ?, visa_status = ?,
-           institute = ?, submission_date = ?, submitted_by = ?,
-           unconditional_offer = ?, visa_letter = ?, accommodation = ?,
-           tb_certificate = ?, affidavit = ?, financial_documents = ?,
-           visa_link = ?, visa_password = ?, visa_appointment_date = ?,
-           visa_outcome = ?
+      `UPDATE visas SET
+         applicant_name = ?, applicant_email = ?, applicant_phone = ?, country_id = ?,
+         visa_number = ?, visa_type = ?, visa_status = ?,
+         main_applicant_name = ?, main_applicant_relation = ?,
+         main_applicant_institute = ?, main_applicant_visa_category = ?,
+         main_applicant_visa_status = ?, visa_category = ?,
+         institute = ?, submission_date = ?, submitted_by = ?,
+         biometrics = ?, biometrics_appointment_date = ?,
+         medical_test = ?, medical_booked = ?, medical_appointment_date = ?,
+         accommodation_booked = ?, visa_link = ?, visa_website_id = ?,
+         visa_password = ?, visa_appointment_date = ?
        WHERE id = ?`,
       [
+        applicantName,
+        applicantEmail || null,
+        applicantPhone || null,
+        countryId,
         visaNumber || null,
         visaType,
         visaStatus,
-        institute || null,        // NEW
-        submissionDate || null,   // NEW
-        submittedBy || null,      // NEW
-        unconditionalOffer || 'NO',
-        visaLetter || 'NO',
-        accommodation || null,
-        tbCertificate || 'NO',
-        affidavit || 'NO',
-        financialDocuments || 'NO',
+        mainApplicantName || null,
+        mainApplicantRelation || null,
+        mainApplicantInstitute || null,
+        mainApplicantVisaCategory || null,
+        mainApplicantVisaStatus || null,
+        visaCategory || null,
+        institute || null,
+        submissionDate || null,
+        submittedBy || null,
+        biometrics || null,
+        biometricsAppointmentDate || null,
+        medicalTest || null,
+        medicalBooked || null,
+        medicalAppointmentDate || null,
+        accommodationBooked || null,
         visaLink || null,
+        visaWebsiteId || null,
         visaPassword || null,
         visaAppointmentDate || null,
-        visaOutcome || null,
-        visaId
+        visaId,
       ]
     );
 
@@ -413,6 +477,7 @@ router.put('/visas/:visaId', async (req, res) => {
 router.delete('/visas/:visaId', async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    await ensureVisaSchema();
     await connection.beginTransaction();
     const { visaId } = req.params;
 
@@ -422,11 +487,12 @@ router.delete('/visas/:visaId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Visa not found' });
     }
 
-    const [feeReceipts] = await connection.query('SELECT file_path FROM visa_fee_receipts WHERE visa_id = ?', [visaId]);
-    const [financialDocs] = await connection.query('SELECT file_path FROM visa_financial_documents WHERE visa_id = ?', [visaId]);
-    const [photos] = await connection.query('SELECT file_path FROM visa_passport_photos WHERE visa_id = ?', [visaId]);
-    const [visa] = await connection.query('SELECT birth_certificate_path, travel_history_path FROM visas WHERE id = ?', [visaId]);
+    const [documents] = await connection.query(
+      'SELECT file_path FROM visa_documents WHERE visa_id = ?',
+      [visaId]
+    );
 
+    await connection.query('DELETE FROM visa_documents WHERE visa_id = ?', [visaId]);
     await connection.query('DELETE FROM visas WHERE id = ?', [visaId]);
     await connection.commit();
 
@@ -437,11 +503,7 @@ router.delete('/visas/:visaId', async (req, res) => {
       }
     };
 
-    feeReceipts.forEach(r => deleteFile(r.file_path));
-    financialDocs.forEach(d => deleteFile(d.file_path));
-    photos.forEach(p => deleteFile(p.file_path));
-    deleteFile(visa[0]?.birth_certificate_path);
-    deleteFile(visa[0]?.travel_history_path);
+    documents.forEach((d) => deleteFile(d.file_path));
 
     res.json({ success: true, message: 'Visa deleted successfully' });
 
@@ -454,7 +516,103 @@ router.delete('/visas/:visaId', async (req, res) => {
   }
 });
 
-// Upload fee receipt
+router.post('/visas/:visaId/documents', upload.single('document'), async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await ensureVisaSchema();
+    await connection.beginTransaction();
+    const { visaId } = req.params;
+    const documentType = (req.body.documentType || '').trim();
+
+    if (!req.file) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+    if (!documentType) {
+      await connection.rollback();
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ success: false, message: 'Document type is required' });
+    }
+
+    const [visa] = await connection.query('SELECT id FROM visas WHERE id = ?', [visaId]);
+    if (visa.length === 0) {
+      await connection.rollback();
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({ success: false, message: 'Visa not found' });
+    }
+
+    const filePath = `/uploads/visa-documents/${req.file.filename}`;
+    const [result] = await connection.query(
+      `INSERT INTO visa_documents (visa_id, document_type, file_path, original_name)
+       VALUES (?, ?, ?, ?)`,
+      [visaId, documentType, filePath, req.file.originalname]
+    );
+
+    await connection.commit();
+    res.json({
+      success: true,
+      message: 'Document uploaded successfully',
+      document: {
+        id: result.insertId,
+        document_type: documentType,
+        file_path: filePath,
+        original_name: req.file.originalname,
+        uploaded_at: new Date(),
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+    if (req.file) fs.unlinkSync(req.file.path);
+    console.error('Error uploading visa document:', error);
+    res.status(500).json({ success: false, message: 'Failed to upload document' });
+  } finally {
+    connection.release();
+  }
+});
+
+router.get('/visas/:visaId/documents', async (req, res) => {
+  try {
+    await ensureVisaSchema();
+    const { visaId } = req.params;
+    const [documents] = await pool.query(
+      'SELECT * FROM visa_documents WHERE visa_id = ? ORDER BY uploaded_at DESC',
+      [visaId]
+    );
+    res.json({ success: true, documents });
+  } catch (error) {
+    console.error('Error fetching visa documents:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch documents' });
+  }
+});
+
+router.delete('/visas/:visaId/documents/:documentId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { visaId, documentId } = req.params;
+    const [docs] = await connection.query(
+      'SELECT * FROM visa_documents WHERE id = ? AND visa_id = ?',
+      [documentId, visaId]
+    );
+    if (docs.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Document not found' });
+    }
+    const full = path.join(__dirname, '..', docs[0].file_path);
+    if (fs.existsSync(full)) fs.unlinkSync(full);
+    await connection.query('DELETE FROM visa_documents WHERE id = ?', [documentId]);
+    await connection.commit();
+    res.json({ success: true, message: 'Document deleted successfully' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting visa document:', error);
+    res.status(500).json({ success: false, message: 'Failed to delete document' });
+  } finally {
+    connection.release();
+  }
+});
+
+// Legacy upload routes kept for older records
 router.post('/visas/:visaId/fee-receipts', upload.single('feeReceipt'), async (req, res) => {
   const connection = await pool.getConnection();
   try {
