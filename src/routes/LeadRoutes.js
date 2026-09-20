@@ -194,6 +194,8 @@ const serializeQualifications = (qualifications) => {
   const filtered = qualifications.filter(q =>
     q.level?.trim() ||
     q.qualification?.trim() ||
+    q.instituteName?.trim() ||
+    q.institute_name?.trim() ||
     q.percentage?.trim() ||
     q.cgpaDivision?.trim() ||
     q.subject?.trim() ||
@@ -410,7 +412,7 @@ router.post('/leads', async (req, res) => {
       qualifications, referredBy, counsellorNotes, admissionTests
     } = req.body;
     
-    if (!fullName || !email || !phone || !address || !interest) {
+    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
@@ -982,7 +984,7 @@ router.put('/leads/:leadId', async (req, res) => {
       referredBy, admissionTests
     } = req.body;
     
-    if (!fullName || !email || !phone || !address || !interest) {
+    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
