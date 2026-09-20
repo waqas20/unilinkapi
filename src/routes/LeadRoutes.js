@@ -1079,6 +1079,72 @@ router.put('/leads/:leadId', async (req, res) => {
   }
 });
 
+const runOptionalQuery = async (connection, sql, params = []) => {
+  try {
+    await connection.query(sql, params);
+  } catch (err) {
+    if (err.code !== 'ER_BAD_FIELD_ERROR' && err.code !== 'ER_NO_SUCH_TABLE' && err.code !== 'ER_BAD_TABLE_ERROR') {
+      throw err;
+    }
+  }
+};
+
+router.delete('/leads/:leadId', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { leadId } = req.params;
+
+    const [existingLead] = await connection.query(
+      'SELECT id, full_name FROM leads WHERE id = ?',
+      [leadId]
+    );
+    if (existingLead.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    await runOptionalQuery(connection, 'DELETE FROM lead_changes WHERE lead_id = ?', [leadId]);
+    await runOptionalQuery(connection, 'DELETE FROM follow_ups WHERE lead_id = ?', [leadId]);
+    await runOptionalQuery(connection, 'DELETE FROM lead_counselor_assignments WHERE lead_id = ?', [leadId]);
+    await runOptionalQuery(
+      connection,
+      'DELETE FROM counselor_meetings WHERE lead_id = ? AND user_id IS NULL',
+      [leadId]
+    );
+    await runOptionalQuery(
+      connection,
+      'UPDATE counselor_meetings SET lead_id = NULL WHERE lead_id = ?',
+      [leadId]
+    );
+    await runOptionalQuery(
+      connection,
+      'UPDATE users SET source_lead_id = NULL WHERE source_lead_id = ?',
+      [leadId]
+    );
+    await runOptionalQuery(
+      connection,
+      'UPDATE student_counselors SET transferred_from_lead_id = NULL WHERE transferred_from_lead_id = ?',
+      [leadId]
+    );
+
+    const [result] = await connection.query('DELETE FROM leads WHERE id = ?', [leadId]);
+    if (result.affectedRows === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Lead not found' });
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'Lead deleted successfully' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error deleting lead:', error);
+    res.status(500).json({ success: false, message: 'An error occurred while deleting the lead' });
+  } finally {
+    connection.release();
+  }
+});
+
 // ─── Lead invoices (match by email + country validation) ─────────────────────
 router.get('/leads/:leadId/invoices', async (req, res) => {
   try {
