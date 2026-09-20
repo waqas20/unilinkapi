@@ -227,14 +227,20 @@ const normalizeEducationMonth = (value) => {
   return v.slice(0, 10);
 };
 
-const mapEducationRow = (edu) => [
-  edu.education_level?.trim() || null,
-  edu.institute_name?.trim() || null,
-  normalizeEducationMonth(edu.start_date),
-  normalizeEducationMonth(edu.end_date),
-  edu.subjects?.trim() || null,
-  (edu.grade_cgpa ?? edu.result ?? edu.cgpa)?.trim() || null,
-];
+const mapEducationRow = (edu) => {
+  const subjectsValue = Array.isArray(edu.subjects)
+    ? JSON.stringify(edu.subjects)
+    : (typeof edu.subjects === 'string' ? (edu.subjects.trim() || null) : null);
+  const resultValue = (edu.grade_cgpa ?? edu.result ?? edu.cgpa);
+  return [
+    edu.education_level?.trim() || null,
+    edu.institute_name?.trim() || null,
+    normalizeEducationMonth(edu.start_date),
+    normalizeEducationMonth(edu.end_date),
+    subjectsValue,
+    typeof resultValue === 'string' ? (resultValue.trim() || null) : (resultValue || null),
+  ];
+};
 
 const mapWorkRow = (work) => [
   work.company_name?.trim() || null,
@@ -623,7 +629,7 @@ router.post('/students', async (req, res) => {
 
     if (education && Array.isArray(education) && education.length > 0) {
       const educationValues = education
-        .filter(edu => edu.education_level?.trim() && edu.institute_name?.trim())
+        .filter(edu => edu.education_level?.trim())
         .map(edu => [newStudentId, ...mapEducationRow(edu)]);
       if (educationValues.length > 0) {
         await connection.query(
@@ -816,7 +822,7 @@ router.put('/students/:studentId', async (req, res) => {
     if (education && Array.isArray(education)) {
       await connection.query('DELETE FROM student_education WHERE student_id = ?', [studentId]);
       const educationValues = education
-        .filter(edu => edu.education_level?.trim() && edu.institute_name?.trim())
+        .filter(edu => edu.education_level?.trim())
         .map(edu => [studentId, ...mapEducationRow(edu)]);
       if (educationValues.length > 0) {
         await connection.query(

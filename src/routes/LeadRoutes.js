@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import pool, { ensureSchemaMigrations } from '../config/db.js';
 import { claimStudentRegistrationId } from '../utils/studentRegistrationId.js';
+import { qualificationsToEducationRows } from '../utils/qualificationsToEducation.js';
 
 const router = express.Router();
 
@@ -1520,6 +1521,23 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       ]
     );
     const userId = userResult.insertId;
+
+    const educationRows = qualificationsToEducationRows(lead.qualifications);
+    if (educationRows.length > 0) {
+      await connection.query(
+        `INSERT INTO student_education (student_id, education_level, institute_name, start_date, end_date, subjects, result)
+         VALUES ?`,
+        [educationRows.map(row => [
+          userId,
+          row.education_level,
+          row.institute_name,
+          row.start_date,
+          row.end_date,
+          row.subjects,
+          row.result
+        ])]
+      );
+    }
 
     // ── Transfer assigned counselors ──────────────────────────────────────────
     const [assignedCounselors] = await connection.query(
