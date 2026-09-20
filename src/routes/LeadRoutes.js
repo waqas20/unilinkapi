@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import pool, { ensureSchemaMigrations } from '../config/db.js';
+import { claimStudentRegistrationId } from '../utils/studentRegistrationId.js';
 
 const router = express.Router();
 
@@ -1347,7 +1348,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
   try {
     await connection.beginTransaction();
     const { leadId } = req.params;
-    const { applicantInfo = {} } = req.body;
+    const { applicantInfo = {}, studentId: requestedStudentId } = req.body;
 
     const [leads] = await connection.query('SELECT * FROM leads WHERE id = ?', [leadId]);
     if (leads.length === 0) {
@@ -1452,14 +1453,13 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       return res.status(409).json({ success: false, message: 'A user with this email already exists in the system' });
     }
 
-    // ── Generate student ID ───────────────────────────────────────────────────
-    const currentYear = new Date().getFullYear();
-    const [idResult] = await connection.query(
-      `SELECT MAX(CAST(SUBSTRING(student_id, 8) AS UNSIGNED)) as max_id 
-       FROM users WHERE student_id LIKE 'STU${currentYear}%' AND role = 'client'`
-    );
-    const nextId = (idResult[0].max_id || 0) + 1;
-    const studentId = `STU${currentYear}${String(nextId).padStart(3, '0')}`;
+    let studentId;
+    try {
+      studentId = await claimStudentRegistrationId(connection, requestedStudentId);
+    } catch (idErr) {
+      await connection.rollback();
+      return res.status(idErr.statusCode || 400).json({ success: false, message: idErr.message });
+    }
 
     // ── Create password ───────────────────────────────────────────────────────
     const generatedPassword = generatePassword(12);
@@ -1558,6 +1558,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error registering lead as student:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: 'This Registration ID is already in use. Please enter a unique ID.' });
+    }
     res.status(500).json({ success: false, message: 'An error occurred while registering the student' });
   } finally {
     connection.release();

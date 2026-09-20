@@ -1,6 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcrypt';
 import pool from '../config/db.js';
+import { claimStudentRegistrationId } from '../utils/studentRegistrationId.js';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -203,17 +204,6 @@ const mapWorkRow = (work) => [
   normalizeEducationMonth(work.date_to),
   work.employment_type?.trim() || null,
 ];
-
-const generateStudentId = async (connection) => {
-  const currentYear = new Date().getFullYear();
-  const [result] = await connection.query(
-    `SELECT MAX(CAST(SUBSTRING(student_id, 8) AS UNSIGNED)) as max_id 
-     FROM users 
-     WHERE student_id LIKE 'STU${currentYear}%' AND role = 'client'`
-  );
-  const nextId = (result[0].max_id || 0) + 1;
-  return `STU${currentYear}${String(nextId).padStart(3, '0')}`;
-};
 
 const generatePassword = (length = 12) => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*';
@@ -497,7 +487,7 @@ router.post('/students', async (req, res) => {
       sourceInquiry, course, status,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards,
-      intendedPrograms, intakeSession, intakeYear
+      intendedPrograms, intakeSession, intakeYear, studentId: requestedStudentId
     } = req.body;
 
     if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
@@ -525,7 +515,13 @@ router.post('/students', async (req, res) => {
       return res.status(409).json({ success: false, message: 'A user with this email already exists' });
     }
 
-    const studentId = await generateStudentId(connection);
+    let studentId;
+    try {
+      studentId = await claimStudentRegistrationId(connection, requestedStudentId);
+    } catch (idErr) {
+      await connection.rollback();
+      return res.status(idErr.statusCode || 400).json({ success: false, message: idErr.message });
+    }
     const generatedPassword = generatePassword(12);
     const hashedPassword = await bcrypt.hash(generatedPassword, 10);
 
@@ -655,6 +651,9 @@ router.post('/students', async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error creating student:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: 'This Registration ID is already in use. Please enter a unique ID.' });
+    }
     res.status(500).json({ success: false, message: 'An error occurred while creating the student' });
   } finally {
     connection.release();
