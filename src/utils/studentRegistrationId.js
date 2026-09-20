@@ -1,9 +1,15 @@
-export const STUDENT_ID_PREFIX = 'ULK';
+export const STUDENT_ID_PREFIX = 'ULK-';
 
 export const normalizeStudentRegistrationId = (value) => {
   const raw = String(value || '').trim().toUpperCase().replace(/\s+/g, '');
   if (!raw) return '';
-  const suffix = raw.startsWith(STUDENT_ID_PREFIX) ? raw.slice(STUDENT_ID_PREFIX.length) : raw;
+  let suffix = raw;
+  if (suffix.startsWith('ULK-')) {
+    suffix = suffix.slice(4);
+  } else if (suffix.startsWith('ULK')) {
+    suffix = suffix.slice(3);
+  }
+  suffix = suffix.replace(/^-+/, '');
   return suffix ? `${STUDENT_ID_PREFIX}${suffix}` : '';
 };
 
@@ -12,7 +18,7 @@ export const validateStudentRegistrationId = (value) => {
   if (!id || id.length <= STUDENT_ID_PREFIX.length) {
     return {
       valid: false,
-      message: 'Registration ID is required. Enter characters after ULK.'
+      message: 'Registration ID is required. Enter characters after ULK-.'
     };
   }
   if (id.length > 50) {
