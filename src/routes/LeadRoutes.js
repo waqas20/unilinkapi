@@ -979,7 +979,7 @@ router.put('/leads/:leadId', async (req, res) => {
       interest, program, instituteName, comments, counsellorNotes,
       status, countriesOfInterest, countriesOther,
       grades, qualification, qualifications,
-      referredBy, admissionTests, course
+      referredBy, admissionTests
     } = req.body;
     
     if (!fullName || !email || !phone || !address || !interest) {
@@ -1022,19 +1022,18 @@ router.put('/leads/:leadId', async (req, res) => {
     const notesValue = counsellorNotes?.trim() || comments?.trim() || null;
     const admissionTestsJson = serializeAdmissionTests(admissionTests);
     const statusValue = toLeadStatusEnum(status);
-    const courseValue = course?.trim() || null;
     
     try {
       await connection.query(
         `UPDATE leads 
          SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?, institute_name = ?,
-             counsellor_notes = ?, status = ?, course = ?, countries_of_interest = ?, countries_other = ?,
+             counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
              qualifications = ?, referred_by = ?, admission_tests = ?
          WHERE id = ?`,
         [
           trimmedName, trimmedEmail, trimmedPhone, address.trim(),
           interest.trim(), program?.trim() || null, instituteName?.trim() || null,
-          notesValue, statusValue, courseValue,
+          notesValue, statusValue,
           countriesJson, countriesOther?.trim() || null,
           qualificationsJson, referredBy?.trim() || null,
           admissionTestsJson,
