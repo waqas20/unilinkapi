@@ -318,6 +318,7 @@ const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
 //     ADD COLUMN IF NOT EXISTS qualifications TEXT        NULL,
 //     ADD COLUMN IF NOT EXISTS counsellor_notes TEXT      NULL,
 //     ADD COLUMN IF NOT EXISTS referred_by  VARCHAR(255)  NULL,
+//     ADD COLUMN IF NOT EXISTS referred_by_name VARCHAR(255) NULL,
 //     ADD COLUMN IF NOT EXISTS countries_other VARCHAR(255) NULL,
 //     ADD COLUMN IF NOT EXISTS admission_tests TEXT       NULL,
 //     ADD COLUMN IF NOT EXISTS invoice_id INT NULL;
@@ -411,10 +412,10 @@ router.post('/leads', async (req, res) => {
       fullName, email, phone, address,
       interest, program, instituteName,
       countriesOfInterest, countriesOther,
-      qualifications, referredBy, counsellorNotes, admissionTests
+      qualifications, referredBy, referredByName, counsellorNotes, admissionTests
     } = req.body;
     
-    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim()) {
+    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim() || !referredByName?.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
@@ -467,13 +468,13 @@ router.post('/leads', async (req, res) => {
         `INSERT INTO leads
            (full_name, email, phone, address, interest, program, institute_name,
             countries_of_interest, countries_other, qualifications,
-            referred_by, counsellor_notes, admission_tests, is_follow_up, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
+            referred_by, referred_by_name, counsellor_notes, admission_tests, is_follow_up, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, 'New')`,
         [
           trimmedName, trimmedEmail, trimmedPhone, address.trim(),
           interest.trim(), program?.trim() || null, instituteName?.trim() || null,
           countriesJson, countriesOther?.trim() || null, qualificationsJson,
-          referredBy?.trim() || null, counsellorNotes?.trim() || null,
+          referredBy?.trim() || null, referredByName?.trim() || null, counsellorNotes?.trim() || null,
           admissionTestsJson
         ]
       );
@@ -563,7 +564,7 @@ router.post('/leads/lookup', async (req, res) => {
       [leads] = await pool.query(
         `SELECT id, full_name, email, phone, address, interest, program, institute_name, comments,
                 countries_of_interest, countries_other, grades, qualification, qualifications,
-                referred_by, counsellor_notes, admission_tests,
+                referred_by, referred_by_name, counsellor_notes, admission_tests,
                 (SELECT COUNT(*) FROM follow_ups WHERE lead_id = leads.id) as follow_up_count,
                 created_at, updated_at
          FROM leads 
@@ -624,7 +625,7 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       fullName, email, phone, address,
       interest, program, instituteName,
       countriesOfInterest, countriesOther,
-      qualifications, referredBy, counsellorNotes, admissionTests,
+      qualifications, referredBy, referredByName, counsellorNotes, admissionTests,
       purposeOfVisit
     } = req.body;
     
@@ -727,6 +728,7 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       countriesOther: 'countries_other',
       qualifications: 'qualifications',
       referredBy: 'referred_by',
+      referredByName: 'referred_by_name',
       admissionTests: 'admission_tests'
     };
 
@@ -743,6 +745,7 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       countriesOther: countriesOther?.trim() || null,
       qualifications: qualificationsJson,
       referredBy: referredBy?.trim() || null,
+      referredByName: referredByName?.trim() || null,
       admissionTests: admissionTestsJson
     };
     
@@ -774,14 +777,14 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
         `UPDATE leads 
          SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?, institute_name = ?,
              countries_of_interest = ?, countries_other = ?, qualifications = ?,
-             referred_by = ?, counsellor_notes = ?, admission_tests = ?,
+             referred_by = ?, referred_by_name = ?, counsellor_notes = ?, admission_tests = ?,
              purpose_of_visit = ?, is_follow_up = TRUE
          WHERE id = ?`,
         [
           trimmedName, trimmedEmail, trimmedPhone, address.trim(),
           interest.trim(), program?.trim() || null, instituteName?.trim() || null,
           countriesJson, countriesOther?.trim() || null, qualificationsJson,
-          referredBy?.trim() || null, counsellorNotes?.trim() || null,
+          referredBy?.trim() || null, referredByName?.trim() || null, counsellorNotes?.trim() || null,
           admissionTestsJson,
           purposeOfVisit?.trim() || oldData.purpose_of_visit || null,
           leadId
@@ -983,10 +986,10 @@ router.put('/leads/:leadId', async (req, res) => {
       interest, program, instituteName, comments, counsellorNotes,
       status, countriesOfInterest, countriesOther,
       grades, qualification, qualifications,
-      referredBy, admissionTests
+      referredBy, referredByName, admissionTests
     } = req.body;
     
-    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim()) {
+    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim() || !referredByName?.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
@@ -1032,14 +1035,14 @@ router.put('/leads/:leadId', async (req, res) => {
         `UPDATE leads 
          SET full_name = ?, email = ?, phone = ?, address = ?, interest = ?, program = ?, institute_name = ?,
              counsellor_notes = ?, status = ?, countries_of_interest = ?, countries_other = ?,
-             qualifications = ?, referred_by = ?, admission_tests = ?
+             qualifications = ?, referred_by = ?, referred_by_name = ?, admission_tests = ?
          WHERE id = ?`,
         [
           trimmedName, trimmedEmail, trimmedPhone, address.trim(),
           interest.trim(), program?.trim() || null, instituteName?.trim() || null,
           notesValue, statusValue,
           countriesJson, countriesOther?.trim() || null,
-          qualificationsJson, referredBy?.trim() || null,
+          qualificationsJson, referredBy?.trim() || null, referredByName?.trim() || null,
           admissionTestsJson,
           leadId
         ]
