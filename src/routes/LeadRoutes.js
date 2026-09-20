@@ -200,6 +200,8 @@ const serializeQualifications = (qualifications) => {
     q.cgpaDivision?.trim() ||
     q.subject?.trim() ||
     q.grade?.trim() ||
+    (Array.isArray(q.aLevelTypes) && q.aLevelTypes.length > 0) ||
+    (q.stages && typeof q.stages === 'object' && Object.keys(q.stages).length > 0) ||
     (Array.isArray(q.subjects) && q.subjects.some(s => s.subject?.trim() || s.grade?.trim()))
   );
   return filtered.length > 0 ? JSON.stringify(filtered) : null;
