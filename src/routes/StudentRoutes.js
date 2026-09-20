@@ -167,17 +167,56 @@ const validatePhone = (phone) => {
   return phoneRegex.test(phone) && phone.replace(/\D/g, '').length >= 10;
 };
 
-const serializePassportNo = (passportNo) => {
-  if (Array.isArray(passportNo)) {
-    const cleaned = passportNo.map(p => String(p || '').trim()).filter(Boolean);
-    if (!cleaned.length) return null;
-    return cleaned.length === 1 ? cleaned[0] : JSON.stringify(cleaned);
+const toPassportEntry = (item) => {
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
+    return {
+      number: String(item.number || item.passport_no || '').trim(),
+      issueDate: String(item.issueDate || item.issue_date || '').split('T')[0] || '',
+      placeOfIssue: String(item.placeOfIssue || item.place_of_issue || '').trim(),
+    };
   }
+  return {
+    number: String(item || '').trim(),
+    issueDate: '',
+    placeOfIssue: '',
+  };
+};
+
+const parsePassportList = (passportNo) => {
+  if (!passportNo) return [];
+  if (Array.isArray(passportNo)) return passportNo.map(toPassportEntry);
+  if (typeof passportNo === 'object') return [toPassportEntry(passportNo)];
   if (typeof passportNo === 'string') {
     const trimmed = passportNo.trim();
-    return trimmed || null;
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed.map(toPassportEntry);
+      if (parsed && typeof parsed === 'object') return [toPassportEntry(parsed)];
+    } catch { /* plain string */ }
+    return [toPassportEntry(trimmed)];
   }
-  return null;
+  return [];
+};
+
+const serializePassportNo = (passportNo) => {
+  const list = parsePassportList(passportNo).filter(p => p.number || p.issueDate || p.placeOfIssue);
+  if (!list.length) return null;
+  if (list.length === 1) return list[0].number || null;
+  return JSON.stringify(list);
+};
+
+const firstPassportIssueDate = (passportNo, fallback) => {
+  const first = parsePassportList(passportNo)[0];
+  const value = first?.issueDate || fallback || null;
+  if (!value) return null;
+  return String(value).split('T')[0] || null;
+};
+
+const firstPassportPlaceOfIssue = (passportNo, fallback) => {
+  const first = parsePassportList(passportNo)[0];
+  const value = first?.placeOfIssue || fallback || '';
+  return String(value).trim() || null;
 };
 
 const normalizeEducationMonth = (value) => {
@@ -544,8 +583,8 @@ router.post('/students', async (req, res) => {
         nationality?.trim() || null, maritalStatus || null, gender || null,
         cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
         serializePassportNo(passportNo),
-        passportIssueDate || null,
-        passportPlaceOfIssue?.trim() || null,
+        firstPassportIssueDate(passportNo, passportIssueDate),
+        firstPassportPlaceOfIssue(passportNo, passportPlaceOfIssue),
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, course?.trim() || null,
@@ -725,8 +764,8 @@ router.put('/students/:studentId', async (req, res) => {
         nationality?.trim() || null, maritalStatus || null, gender || null,
         cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
         serializePassportNo(passportNo),
-        passportIssueDate ? passportIssueDate.split('T')[0] : null,
-        passportPlaceOfIssue?.trim() || null,
+        firstPassportIssueDate(passportNo, passportIssueDate),
+        firstPassportPlaceOfIssue(passportNo, passportPlaceOfIssue),
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, status || 'Active', course?.trim() || null,
