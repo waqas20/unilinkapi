@@ -136,6 +136,34 @@ const ensureIntendedProgramSchema = async () => {
   `);
 };
 
+const ensureStudentNotesSchema = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS student_notes (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      student_id INT NOT NULL,
+      note_text TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_student_notes_student (student_id)
+    )
+  `);
+};
+
+const saveStudentNotes = async (connection, studentId, notes) => {
+  if (!Array.isArray(notes)) return;
+  await connection.query('DELETE FROM student_notes WHERE student_id = ?', [studentId]);
+  const rows = notes
+    .map(n => (typeof n === 'string' ? n : (n?.note_text || n?.text || '')))
+    .map(text => String(text || '').trim())
+    .filter(Boolean);
+  for (const noteText of rows) {
+    await connection.query(
+      'INSERT INTO student_notes (student_id, note_text) VALUES (?, ?)',
+      [studentId, noteText]
+    );
+  }
+};
+
 const saveIntendedPrograms = async (connection, studentId, intendedPrograms) => {
   if (!Array.isArray(intendedPrograms)) return;
   await connection.query('DELETE FROM student_intended_programs WHERE student_id = ?', [studentId]);
@@ -384,6 +412,18 @@ router.get('/students/:studentId', async (req, res) => {
       [studentId]
     );
 
+    let notes = [];
+    try {
+      await ensureStudentNotesSchema();
+      const [noteRows] = await pool.query(
+        'SELECT * FROM student_notes WHERE student_id = ? ORDER BY id ASC',
+        [studentId]
+      );
+      notes = noteRows;
+    } catch (err) {
+      console.warn('Student notes fetch:', err.message);
+    }
+
     let intendedPrograms = [];
     try {
       await ensureIntendedProgramSchema();
@@ -408,6 +448,7 @@ router.get('/students/:studentId', async (req, res) => {
       familyDetails,
       activities,
       awards,
+      notes,
       intendedPrograms
     });
 
@@ -520,6 +561,7 @@ router.post('/students', async (req, res) => {
   try {
     await ensureFamilyPostalCodeColumn();
     await ensureIntendedProgramSchema();
+    await ensureStudentNotesSchema();
     await connection.beginTransaction();
 
     const {
@@ -531,7 +573,7 @@ router.post('/students', async (req, res) => {
       guardianName, guardianRelation, guardianMobile, guardianEmail,
       sourceInquiry, course, status,
       emergencyContact, familyDetails,
-      education, workExperience, activities, awards,
+      education, workExperience, activities, awards, notes,
       intendedPrograms, intakeSession, intakeYear, studentId: requestedStudentId
     } = req.body;
 
@@ -682,6 +724,7 @@ router.post('/students', async (req, res) => {
     }
 
     await saveIntendedPrograms(connection, newStudentId, intendedPrograms);
+    await saveStudentNotes(connection, newStudentId, notes);
 
     await connection.commit();
 
@@ -711,6 +754,7 @@ router.put('/students/:studentId', async (req, res) => {
   try {
     await ensureFamilyPostalCodeColumn();
     await ensureIntendedProgramSchema();
+    await ensureStudentNotesSchema();
     await connection.beginTransaction();
 
     const { studentId } = req.params;
@@ -723,7 +767,7 @@ router.put('/students/:studentId', async (req, res) => {
       guardianName, guardianRelation, guardianMobile, guardianEmail,
       sourceInquiry, status, course,
       emergencyContact, familyDetails,
-      education, workExperience, activities, awards,
+      education, workExperience, activities, awards, notes,
       intendedPrograms, intakeSession, intakeYear
     } = req.body;
 
@@ -878,6 +922,7 @@ router.put('/students/:studentId', async (req, res) => {
     }
 
     await saveIntendedPrograms(connection, studentId, intendedPrograms);
+    await saveStudentNotes(connection, studentId, notes);
 
     await connection.commit();
     res.json({ success: true, message: 'Student updated successfully' });
