@@ -768,16 +768,16 @@ router.put('/students/:studentId', async (req, res) => {
       sourceInquiry, status, course,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards, notes,
-      intendedPrograms, intakeSession, intakeYear
+      intendedPrograms, intakeSession, intakeYear, counselorIds
     } = req.body;
 
-    if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
+    if (!firstName || !surname || !email || !mobile || !address) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'All required fields must be provided' });
+      return res.status(400).json({ success: false, message: 'First name, surname, email, mobile, and address are required' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
-    const formattedDob = dob.split('T')[0];
+    const formattedDob = dob ? String(dob).split('T')[0] : null;
 
     const [existingStudent] = await connection.query(
       'SELECT id FROM users WHERE id = ? AND role = ?', [studentId, 'client']
@@ -810,7 +810,7 @@ router.put('/students/:studentId', async (req, res) => {
         trimmedEmail, alternativeEmail?.trim() || null,
         mobile.trim(), landline?.trim() || null,
         address.trim(), postalCode?.trim() || null,
-        country, formattedDob,
+        country?.trim() || null, formattedDob,
         nationality?.trim() || null, maritalStatus || null, gender || null,
         cityOfBirth?.trim() || null, countryOfBirth?.trim() || null,
         serializePassportNo(passportNo),
@@ -923,6 +923,17 @@ router.put('/students/:studentId', async (req, res) => {
 
     await saveIntendedPrograms(connection, studentId, intendedPrograms);
     await saveStudentNotes(connection, studentId, notes);
+
+    if (Array.isArray(counselorIds)) {
+      const uniqueIds = [...new Set(counselorIds.map(id => Number(id)).filter(id => Number.isFinite(id) && id > 0))];
+      await connection.query('DELETE FROM student_counselors WHERE user_id = ?', [studentId]);
+      for (const counselorId of uniqueIds) {
+        await connection.query(
+          'INSERT INTO student_counselors (user_id, counselor_id) VALUES (?, ?)',
+          [studentId, counselorId]
+        );
+      }
+    }
 
     await connection.commit();
     res.json({ success: true, message: 'Student updated successfully' });
@@ -1181,14 +1192,27 @@ router.post('/students/:studentId/documents', upload.single('document'), async (
     }
 
     const filePath = `/uploads/student-documents/${req.file.filename}`;
-    await connection.query(
+    const [insertResult] = await connection.query(
       `INSERT INTO student_documents (student_id, document_name, document_type, file_path, display_order)
        VALUES (?, ?, ?, ?, ?)`,
       [studentId, documentName, documentType, filePath, displayOrder || 99]
     );
 
     await connection.commit();
-    res.json({ success: true, message: 'Document uploaded successfully', filePath });
+    res.json({
+      success: true,
+      message: 'Document uploaded successfully',
+      filePath,
+      document: {
+        id: insertResult.insertId,
+        student_id: Number(studentId),
+        document_name: documentName,
+        document_type: documentType,
+        file_path: filePath,
+        display_order: Number(displayOrder) || 99,
+        verified: 0
+      }
+    });
 
   } catch (error) {
     await connection.rollback();
