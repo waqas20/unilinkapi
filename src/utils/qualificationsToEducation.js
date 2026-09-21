@@ -36,7 +36,7 @@ const parseLeadQualifications = (raw) => {
 };
 
 const rowFromDetail = (level, detail = {}) => {
-  const subjects = SUBJECT_GRADE_LEVELS.includes(level) || String(level).startsWith('A Level')
+  const subjects = SUBJECT_GRADE_LEVELS.includes(level) || level === 'A Level'
     ? serializeSubjects(detail.subjects)
     : [];
   let result = '';
@@ -44,12 +44,17 @@ const rowFromDetail = (level, detail = {}) => {
   else if (CGPA_LEVELS.includes(level)) result = (detail.cgpaDivision || '').trim();
   else result = summarizeSubjectGrades(detail.subjects);
 
+  const aLevelType = A_LEVEL_TYPES.includes(detail.aLevelType) ? detail.aLevelType : null;
+  const subjectsValue = aLevelType
+    ? JSON.stringify({ aLevelType, subjects })
+    : (subjects.length ? JSON.stringify(subjects) : null);
+
   return {
     education_level: level,
     institute_name: (detail.instituteName || detail.institute_name || '').trim() || null,
     start_date: toMonthValue(detail.durationFrom || detail.start_date),
     end_date: toMonthValue(detail.durationTo || detail.end_date),
-    subjects: subjects.length ? JSON.stringify(subjects) : null,
+    subjects: subjectsValue,
     result: result || null,
   };
 };
@@ -67,7 +72,7 @@ export const qualificationsToEducationRows = (rawQualifications) => {
       );
       if (types.length) {
         types.forEach(type => {
-          rows.push(rowFromDetail(`A Level ${type}`, entry.stages?.[type] || {}));
+          rows.push(rowFromDetail('A Level', { ...(entry.stages?.[type] || {}), aLevelType: type }));
         });
         return;
       }

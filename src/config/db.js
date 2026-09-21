@@ -39,6 +39,8 @@ export async function ensureSchemaMigrations() {
     await connection.query('ALTER TABLE users ADD UNIQUE INDEX idx_users_student_id (student_id)').catch(() => {});
     await connection.query('ALTER TABLE users MODIFY COLUMN passport_no TEXT NULL').catch(() => {});
     await connection.query('ALTER TABLE student_education MODIFY COLUMN subjects TEXT NULL').catch(() => {});
+    await connection.query('ALTER TABLE student_education MODIFY COLUMN education_level VARCHAR(50) NULL').catch(() => {});
+    await connection.query('ALTER TABLE student_education MODIFY COLUMN result TEXT NULL').catch(() => {});
 
     await connection.query('ALTER TABLE users MODIFY COLUMN dob DATE NULL').catch(() => {});
 
