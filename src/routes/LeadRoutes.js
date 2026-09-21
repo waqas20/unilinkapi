@@ -1347,6 +1347,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
   const connection = await pool.getConnection();
   
   try {
+    await ensureSchemaMigrations();
     await connection.beginTransaction();
     const { leadId } = req.params;
     const { applicantInfo = {}, studentId: requestedStudentId } = req.body;
@@ -1474,6 +1475,12 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
 
     // ── Insert user with full applicant info ──────────────────────────────────
     // invoice_id column is added by GET /leads/migrate-invoice
+    const admissionTestsJson = lead.admission_tests
+      ? (typeof lead.admission_tests === 'string'
+          ? lead.admission_tests
+          : JSON.stringify(lead.admission_tests))
+      : null;
+
     const [userResult] = await connection.query(
       `INSERT INTO users 
          (student_id, name, middle_name, surname,
@@ -1487,8 +1494,9 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           payment_status,
           invoice_id,
           source_lead_id,
+          admission_tests,
           password, plain_password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId,
         name.trim(),
@@ -1515,6 +1523,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         leadPaymentStatus,
         invoiceId || null,
         leadId,
+        admissionTestsJson,
         hashedPassword,
         generatedPassword,
         studentStatus || 'Active',

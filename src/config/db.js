@@ -34,6 +34,7 @@ export async function ensureSchemaMigrations() {
   try {
     await addColumnIfMissing(connection, 'users', 'invoice_id', 'INT NULL');
     await addColumnIfMissing(connection, 'users', 'source_lead_id', 'INT NULL');
+    await addColumnIfMissing(connection, 'users', 'admission_tests', 'TEXT NULL');
     await addColumnIfMissing(connection, 'leads', 'referred_by_name', 'VARCHAR(255) NULL');
     await connection.query('ALTER TABLE users MODIFY COLUMN student_id VARCHAR(50) NULL').catch(() => {});
     await connection.query('ALTER TABLE users ADD UNIQUE INDEX idx_users_student_id (student_id)').catch(() => {});

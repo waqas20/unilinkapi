@@ -149,6 +149,22 @@ const ensureStudentNotesSchema = async () => {
   `);
 };
 
+const ensureAdmissionTestsColumn = async () => {
+  await ensureColumn('users', 'admission_tests', 'TEXT NULL');
+};
+
+const serializeAdmissionTests = (admissionTests) => {
+  if (admissionTests == null) return null;
+  if (typeof admissionTests === 'string') {
+    const trimmed = admissionTests.trim();
+    return trimmed || null;
+  }
+  if (typeof admissionTests === 'object') {
+    return JSON.stringify(admissionTests);
+  }
+  return null;
+};
+
 const saveStudentNotes = async (connection, studentId, notes) => {
   if (!Array.isArray(notes)) return;
   await connection.query('DELETE FROM student_notes WHERE student_id = ?', [studentId]);
@@ -562,6 +578,7 @@ router.post('/students', async (req, res) => {
     await ensureFamilyPostalCodeColumn();
     await ensureIntendedProgramSchema();
     await ensureStudentNotesSchema();
+    await ensureAdmissionTestsColumn();
     await connection.beginTransaction();
 
     const {
@@ -574,7 +591,8 @@ router.post('/students', async (req, res) => {
       sourceInquiry, course, status,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards, notes,
-      intendedPrograms, intakeSession, intakeYear, studentId: requestedStudentId
+      intendedPrograms, intakeSession, intakeYear, admissionTests,
+      studentId: requestedStudentId
     } = req.body;
 
     if (!firstName || !surname || !email || !mobile || !address || !country || !dob) {
@@ -614,14 +632,17 @@ router.post('/students', async (req, res) => {
 
     const studentStatus = status || 'Active';
 
+    const admissionTestsJson = serializeAdmissionTests(admissionTests);
+
     const [result] = await connection.query(
       `INSERT INTO users 
       (student_id, name, middle_name, surname, email, alternative_email, mobile, landline,
        address, postal_code, country, dob, nationality, marital_status, gender,
        city_of_birth, country_of_birth, passport_no, passport_issue_date, passport_place_of_issue,
        guardian_name, guardian_relation, guardian_mobile, guardian_email,
-       source_inquiry, course, intake_session, intake_year, password, plain_password, role, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       source_inquiry, course, intake_session, intake_year, admission_tests,
+       password, plain_password, role, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId, firstName.trim(), middleName?.trim() || null, surname.trim(),
         trimmedEmail, alternativeEmail?.trim() || null,
@@ -637,6 +658,7 @@ router.post('/students', async (req, res) => {
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, course?.trim() || null,
         intakeSession?.trim() || null, intakeYear ? String(intakeYear).trim() : null,
+        admissionTestsJson,
         hashedPassword,
         generatedPassword,
         studentStatus
@@ -755,6 +777,7 @@ router.put('/students/:studentId', async (req, res) => {
     await ensureFamilyPostalCodeColumn();
     await ensureIntendedProgramSchema();
     await ensureStudentNotesSchema();
+    await ensureAdmissionTestsColumn();
     await connection.beginTransaction();
 
     const { studentId } = req.params;
@@ -768,7 +791,8 @@ router.put('/students/:studentId', async (req, res) => {
       sourceInquiry, status, course,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards, notes,
-      intendedPrograms, intakeSession, intakeYear, counselorIds
+      intendedPrograms, intakeSession, intakeYear, counselorIds,
+      admissionTests
     } = req.body;
 
     if (!firstName || !surname || !email || !mobile || !address) {
@@ -803,7 +827,8 @@ router.put('/students/:studentId', async (req, res) => {
         city_of_birth = ?, country_of_birth = ?,
         passport_no = ?, passport_issue_date = ?, passport_place_of_issue = ?,
         guardian_name = ?, guardian_relation = ?, guardian_mobile = ?, guardian_email = ?,
-        source_inquiry = ?, status = ?, course = ?, intake_session = ?, intake_year = ?
+        source_inquiry = ?, status = ?, course = ?, intake_session = ?, intake_year = ?,
+        admission_tests = ?
       WHERE id = ?`,
       [
         firstName.trim(), middleName?.trim() || null, surname.trim(),
@@ -820,6 +845,7 @@ router.put('/students/:studentId', async (req, res) => {
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
         sourceInquiry || null, status || 'Active', course?.trim() || null,
         intakeSession?.trim() || null, intakeYear ? String(intakeYear).trim() : null,
+        serializeAdmissionTests(admissionTests),
         studentId
       ]
     );
