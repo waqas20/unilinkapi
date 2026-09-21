@@ -41,6 +41,12 @@ export async function ensureSchemaMigrations() {
     await connection.query('ALTER TABLE student_education MODIFY COLUMN subjects TEXT NULL').catch(() => {});
     await connection.query('ALTER TABLE student_education MODIFY COLUMN education_level VARCHAR(50) NULL').catch(() => {});
     await connection.query('ALTER TABLE student_education MODIFY COLUMN result TEXT NULL').catch(() => {});
+    await connection.query('ALTER TABLE student_education MODIFY COLUMN start_date DATE NULL').catch((err) => {
+      console.warn('student_education.start_date nullable:', err.message);
+    });
+    await connection.query('ALTER TABLE student_education MODIFY COLUMN end_date DATE NULL').catch((err) => {
+      console.warn('student_education.end_date nullable:', err.message);
+    });
 
     await connection.query('ALTER TABLE users MODIFY COLUMN dob DATE NULL').catch(() => {});
 
