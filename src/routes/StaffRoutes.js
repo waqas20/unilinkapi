@@ -22,20 +22,23 @@ const APP_MODULE_KEYS = [
 ];
 
 const parseAllowedModules = (value) => {
-  if (!value) return [];
-  if (Array.isArray(value)) return value.map(String).filter(k => APP_MODULE_KEYS.includes(k));
-  try {
-    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-    if (Array.isArray(parsed)) {
-      return parsed.map(String).filter(k => APP_MODULE_KEYS.includes(k));
+  let list = [];
+  if (!value) list = [];
+  else if (Array.isArray(value)) list = value.map(String).filter(k => APP_MODULE_KEYS.includes(k));
+  else {
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+      if (Array.isArray(parsed)) {
+        list = parsed.map(String).filter(k => APP_MODULE_KEYS.includes(k));
+      } else if (parsed && typeof parsed === 'object') {
+        list = Object.keys(parsed).filter(k => parsed[k] && APP_MODULE_KEYS.includes(k));
+      }
+    } catch {
+      list = [];
     }
-    if (parsed && typeof parsed === 'object') {
-      return Object.keys(parsed).filter(k => parsed[k] && APP_MODULE_KEYS.includes(k));
-    }
-  } catch {
-    /* ignore */
   }
-  return [];
+  if (!list.includes('dashboard')) list = ['dashboard', ...list];
+  return list;
 };
 
 const serializeAllowedModules = (modules) => {

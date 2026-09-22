@@ -30,11 +30,14 @@ router.get('/counselors', async (req, res) => {
     const [counselors] = await pool.query(
       `SELECT c.*, 
               COUNT(DISTINCT sc.user_id) as number_of_students,
+              COUNT(DISTINCT CASE WHEN l.is_registered = FALSE OR l.is_registered = 0 THEN lca.lead_id END) as number_of_leads,
               COUNT(DISTINCT cm.id) as total_meetings,
               COUNT(DISTINCT CASE WHEN cm.status = 'Scheduled' THEN cm.id END) as scheduled_meetings,
               COUNT(DISTINCT CASE WHEN cm.status = 'Completed' THEN cm.id END) as completed_meetings
        FROM counselors c
        LEFT JOIN student_counselors sc ON c.id = sc.counselor_id
+       LEFT JOIN lead_counselor_assignments lca ON c.id = lca.counselor_id
+       LEFT JOIN leads l ON l.id = lca.lead_id
        LEFT JOIN counselor_meetings cm ON c.id = cm.counselor_id
        GROUP BY c.id
        ORDER BY c.created_at DESC`
@@ -95,17 +98,19 @@ router.get('/counselors/:counselorId', async (req, res) => {
     
     // Get assigned leads
     const [leads] = await pool.query(
-      `SELECT l.id, l.full_name, l.email, l.phone, l.interest, lca.assigned_at
+      `SELECT l.id, l.full_name, l.email, l.phone, l.interest, l.program,
+              l.countries_of_interest, l.countries_other, l.status, l.created_at, lca.assigned_at
        FROM leads l
        INNER JOIN lead_counselor_assignments lca ON l.id = lca.lead_id
-       WHERE lca.counselor_id = ? AND l.is_registered = FALSE
+       WHERE lca.counselor_id = ? AND (l.is_registered = FALSE OR l.is_registered = 0)
        ORDER BY lca.assigned_at DESC`,
       [counselorId]
     );
     
     // Get assigned students
     const [students] = await pool.query(
-      `SELECT u.id, u.name, u.email, sc.assigned_at
+      `SELECT u.id, u.student_id, u.name, u.middle_name, u.surname, u.email, u.mobile,
+              u.country, u.status, u.created_at, sc.assigned_at
        FROM users u
        INNER JOIN student_counselors sc ON u.id = sc.user_id
        WHERE sc.counselor_id = ?
