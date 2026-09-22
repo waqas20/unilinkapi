@@ -1551,6 +1551,7 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
     await connection.beginTransaction();
     const { invoiceId } = req.params;
     const {
+      fullEdit,
       paymentStatus, paidAmount, paymentDate, installmentAmount,
       bankAccountId, baseAmount, discount, gstPercent, gstAmount, finalAmount,
       invoiceDate, dueDate, universityName, commissionReference,
@@ -1559,10 +1560,18 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       showConvertedCurrency,
       studentName, studentEmail, studentMobile,
       agentName, agentEmail, agentPhone,
+      // Full-edit (create-form replica) fields
+      paymentMethod,
+      studentId, isManualStudent,
+      manualStudentName, manualStudentEmail, manualStudentMobile, manualStudentCountry,
+      selectedCountries,
+      commissionStudents, agentStudents,
+      extraServices, selectedCountryServices, selectedDefaultServices,
+      selectedCurrency, exchangeRate, convertedAmount,
     } = req.body;
 
     const [existing] = await connection.query(
-      'SELECT id, paid_amount, final_amount, invoice_type, is_manual_student, agent_id FROM invoices WHERE id = ?',
+      'SELECT id, paid_amount, final_amount, invoice_type, is_manual_student, agent_id, student_id FROM invoices WHERE id = ?',
       [invoiceId]
     );
     if (existing.length === 0) {
@@ -1570,8 +1579,246 @@ router.put('/finance/invoices/:invoiceId', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
 
+    const invoiceType = existing[0].invoice_type;
     const safeFloat = (v) => { const n = parseFloat(v); return isFinite(n) ? n : null; };
     const resolvedShowConverted = showConvertedCurrency === false || showConvertedCurrency === 0 ? 0 : 1;
+
+    // ── Full edit: replace invoice fields + related service/student rows ──
+    if (fullEdit) {
+      const resolvedPaymentMethod = paymentMethod === 'cash' ? 'cash' : 'bank';
+      if (resolvedPaymentMethod === 'bank') {
+        if (!bankAccountId) {
+          await connection.rollback();
+          return res.status(400).json({ success: false, message: 'Bank account is required for bank transfers' });
+        }
+        const [bank] = await connection.query('SELECT id FROM bank_accounts WHERE id = ? AND status = ?', [bankAccountId, 'Active']);
+        if (bank.length === 0) {
+          await connection.rollback();
+          return res.status(404).json({ success: false, message: 'Bank account not found or inactive' });
+        }
+      }
+
+      let resolvedStudentName = null, resolvedStudentRefId = null, resolvedStudentEmail = null, resolvedStudentMobile = null, resolvedStudentCountry = null;
+      const resolvedIsManual = isManualStudent ? 1 : 0;
+      const selectedCountryNames = Array.isArray(selectedCountries)
+        ? selectedCountries.map(c => c.country_name).filter(Boolean)
+        : [];
+      const invoiceCountriesLabel = selectedCountryNames.length > 0 ? selectedCountryNames.join(', ') : null;
+
+      if (invoiceType === 'Student') {
+        if (isManualStudent) {
+          resolvedStudentName = manualStudentName?.trim() || null;
+          resolvedStudentEmail = manualStudentEmail?.trim() || null;
+          resolvedStudentMobile = manualStudentMobile?.trim() || null;
+          resolvedStudentCountry = invoiceCountriesLabel || manualStudentCountry?.trim() || null;
+        } else if (studentId) {
+          const [students] = await connection.query(
+            'SELECT name, middle_name, surname, student_id, email, mobile, country FROM users WHERE id = ?',
+            [studentId]
+          );
+          if (students.length > 0) {
+            const s = students[0];
+            resolvedStudentName = [s.name, s.middle_name, s.surname].filter(Boolean).join(' ');
+            resolvedStudentRefId = s.student_id;
+            resolvedStudentEmail = s.email;
+            resolvedStudentMobile = s.mobile;
+            resolvedStudentCountry = invoiceCountriesLabel || s.country;
+          }
+        }
+      }
+
+      const extrasTotal = Array.isArray(extraServices)
+        ? extraServices.reduce((sum, s) => sum + (parseFloat(s.price) || 0), 0) : 0;
+      const commissionPercent = parseFloat(agentCommissionPercent) || 0;
+      const totalBase = parseFloat(baseAmount) || 0;
+
+      let resolvedFinalAmount = parseFloat(finalAmount) || 0;
+      let uniName = universityName || null;
+      let uniRef = commissionReference || null;
+
+      if (invoiceType === 'University Commission' && Array.isArray(commissionStudents) && commissionStudents.length > 0) {
+        resolvedFinalAmount = commissionStudents.reduce((sum, s) => sum + (parseFloat(s.commissionAmount) || 0), 0);
+        if (!uniName && commissionStudents[0]?.universityName) uniName = commissionStudents[0].universityName;
+        if (!uniRef && commissionStudents[0]?.commissionReference) uniRef = commissionStudents[0].commissionReference;
+      }
+
+      const resolvedAgentCommissionAmount = invoiceType === 'Agent Commission'
+        ? (totalBase * commissionPercent / 100) : null;
+
+      const resolvedGstPercent = invoiceType === 'Agent Commission' ? 0 : (parseFloat(gstPercent) || 0);
+      const resolvedGstAmount = invoiceType === 'Agent Commission' ? 0 : (parseFloat(gstAmount) || 0);
+      const resolvedCurrency = selectedCurrency || 'PKR';
+      const resolvedExchangeRate = resolvedCurrency === 'PKR' ? 1 : (parseFloat(exchangeRate) || 1);
+      const resolvedConvertedAmount = resolvedCurrency === 'PKR' ? null : (parseFloat(convertedAmount) || null);
+
+      await connection.query(
+        `UPDATE invoices SET
+          invoice_date=?, due_date=?,
+          payment_method=?, bank_account_id=?,
+          student_id=?, student_name=?, student_ref_id=?, student_email=?, student_mobile=?, student_country=?,
+          is_manual_student=?, manual_student_name=?, manual_student_email=?, manual_student_mobile=?, manual_student_country=?,
+          university_name=?, commission_reference=?,
+          agent_id=?, agent_commission_percent=?, agent_commission_amount=?,
+          base_amount=?, discount=?, extra_services_total=?, final_amount=?,
+          gst_percent=?, gst_amount=?,
+          selected_currency=?, exchange_rate=?, converted_amount=?,
+          show_converted_currency=?,
+          notes=?
+         WHERE id=?`,
+        [
+          invoiceDate || null,
+          dueDate || null,
+          resolvedPaymentMethod,
+          resolvedPaymentMethod === 'bank' ? (bankAccountId || null) : null,
+          invoiceType === 'Student'
+            ? (isManualStudent ? null : (studentId || null))
+            : existing[0].student_id,
+          invoiceType === 'Student'
+            ? (isManualStudent ? (manualStudentName?.trim() || null) : resolvedStudentName)
+            : null,
+          invoiceType === 'Student' ? (isManualStudent ? null : resolvedStudentRefId) : null,
+          invoiceType === 'Student'
+            ? (isManualStudent ? (manualStudentEmail?.trim() || null) : resolvedStudentEmail)
+            : null,
+          invoiceType === 'Student'
+            ? (isManualStudent ? (manualStudentMobile?.trim() || null) : resolvedStudentMobile)
+            : null,
+          invoiceType === 'Student'
+            ? (isManualStudent
+              ? (invoiceCountriesLabel || manualStudentCountry?.trim() || null)
+              : resolvedStudentCountry)
+            : null,
+          invoiceType === 'Student' ? resolvedIsManual : 0,
+          invoiceType === 'Student' && isManualStudent ? (manualStudentName?.trim() || null) : null,
+          invoiceType === 'Student' && isManualStudent ? (manualStudentEmail?.trim() || null) : null,
+          invoiceType === 'Student' && isManualStudent ? (manualStudentMobile?.trim() || null) : null,
+          invoiceType === 'Student' && isManualStudent
+            ? (invoiceCountriesLabel || manualStudentCountry?.trim() || null)
+            : null,
+          uniName,
+          uniRef,
+          invoiceType === 'Agent Commission' ? (agentId || null) : null,
+          invoiceType === 'Agent Commission' ? commissionPercent : null,
+          resolvedAgentCommissionAmount,
+          totalBase,
+          parseFloat(discount) || 0,
+          extrasTotal,
+          invoiceType === 'University Commission' ? resolvedFinalAmount : (parseFloat(finalAmount) || 0),
+          resolvedGstPercent,
+          resolvedGstAmount,
+          resolvedCurrency,
+          resolvedExchangeRate,
+          resolvedConvertedAmount,
+          resolvedShowConverted,
+          notes || null,
+          invoiceId
+        ]
+      );
+
+      // Replace related rows
+      await connection.query('DELETE FROM invoice_extra_services WHERE invoice_id = ?', [invoiceId]);
+      await connection.query('DELETE FROM invoice_country_services WHERE invoice_id = ?', [invoiceId]);
+      await connection.query('DELETE FROM invoice_selected_default_services WHERE invoice_id = ?', [invoiceId]).catch(() => {});
+      await connection.query('DELETE FROM invoice_agent_students WHERE invoice_id = ?', [invoiceId]).catch(() => {});
+      await connection.query('DELETE FROM invoice_commission_students WHERE invoice_id = ?', [invoiceId]).catch(() => {});
+
+      if (Array.isArray(extraServices) && extraServices.length > 0) {
+        for (const svc of extraServices) {
+          if (svc.name) {
+            await connection.query(
+              'INSERT INTO invoice_extra_services (invoice_id, service_name, price) VALUES (?, ?, ?)',
+              [invoiceId, svc.name, parseFloat(svc.price) || 0]
+            );
+          }
+        }
+      }
+
+      if (Array.isArray(selectedCountryServices) && selectedCountryServices.length > 0) {
+        for (const cs of selectedCountryServices) {
+          try {
+            await connection.query(
+              'INSERT INTO invoice_country_services (invoice_id, country_service_id, service_name, country_id, country_name) VALUES (?, ?, ?, ?, ?)',
+              [invoiceId, cs.id, cs.service_name, cs.country_id || null, cs.country_name || null]
+            );
+          } catch {
+            await connection.query(
+              'INSERT INTO invoice_country_services (invoice_id, country_service_id, service_name) VALUES (?, ?, ?)',
+              [invoiceId, cs.id, cs.service_name]
+            );
+          }
+        }
+      }
+
+      if (invoiceType === 'Student' && Array.isArray(selectedDefaultServices) && selectedDefaultServices.length > 0) {
+        for (const ds of selectedDefaultServices) {
+          await connection.query(
+            'INSERT INTO invoice_selected_default_services (invoice_id, service_id, service_name) VALUES (?, ?, ?)',
+            [invoiceId, ds.id || null, ds.service_name]
+          ).catch(() => {});
+        }
+      }
+
+      if (invoiceType === 'Agent Commission' && Array.isArray(agentStudents) && agentStudents.length > 0) {
+        for (const s of agentStudents) {
+          await connection.query(
+            `INSERT INTO invoice_agent_students
+             (invoice_id, student_id, student_name, student_ref_id, is_manual, student_email, student_mobile, student_country)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              invoiceId,
+              s.isManual ? null : (s.id || null),
+              s.student_name,
+              s.student_ref_id || null,
+              s.isManual ? 1 : 0,
+              s.student_email || null,
+              s.student_mobile || null,
+              s.student_country || null
+            ]
+          ).catch(async () => {
+            await connection.query(
+              'INSERT INTO invoice_agent_students (invoice_id, student_id, student_name, student_ref_id) VALUES (?, ?, ?, ?)',
+              [invoiceId, s.isManual ? null : (s.id || null), s.student_name, s.student_ref_id || null]
+            );
+          });
+        }
+      }
+
+      if (invoiceType === 'University Commission' && Array.isArray(commissionStudents) && commissionStudents.length > 0) {
+        for (const s of commissionStudents) {
+          await connection.query(
+            `INSERT INTO invoice_commission_students
+             (invoice_id, student_id, student_name, student_ref_id, student_email, student_mobile,
+              is_manual, commission_amount, university_name, commission_reference)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              invoiceId,
+              s.isManual ? null : (s.studentId || null),
+              s.studentName || '',
+              s.isManual ? null : (s.studentRefId || null),
+              s.studentEmail || null,
+              s.studentMobile || null,
+              s.isManual ? 1 : 0,
+              parseFloat(s.commissionAmount) || 0,
+              s.universityName || null,
+              s.commissionReference || null
+            ]
+          ).catch(err => {
+            console.warn('invoice_commission_students update insert error:', err.message);
+          });
+        }
+      }
+
+      // Recompute payment status against possibly new final amount
+      const totals = await recomputeInvoicePaymentTotals(connection, invoiceId, null);
+
+      await connection.commit();
+      return res.json({
+        success: true,
+        message: 'Invoice updated successfully',
+        paymentStatus: totals?.paymentStatus,
+        payments: await fetchInvoicePayments(pool, invoiceId)
+      });
+    }
 
     // Ensure payments table exists
     await connection.query(`
