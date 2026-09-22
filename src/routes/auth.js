@@ -144,11 +144,25 @@ router.post('/login', async (req, res) => {
       });
     }
     
-    // Find user by email
-    const [users] = await pool.query(
-      'SELECT id, name, email, password, role, created_at FROM users WHERE email = ?',
-      [trimmedEmail]
-    );
+    // Find user by email (allowed_modules / status may not exist on older DBs)
+    let users;
+    try {
+      const [rows] = await pool.query(
+        'SELECT id, name, email, password, role, status, allowed_modules, created_at FROM users WHERE email = ?',
+        [trimmedEmail]
+      );
+      users = rows;
+    } catch (err) {
+      if (err.code === 'ER_BAD_FIELD_ERROR') {
+        const [rows] = await pool.query(
+          'SELECT id, name, email, password, role, created_at FROM users WHERE email = ?',
+          [trimmedEmail]
+        );
+        users = rows;
+      } else {
+        throw err;
+      }
+    }
     
     if (users.length === 0) {
       return res.status(401).json({ 
@@ -158,6 +172,13 @@ router.post('/login', async (req, res) => {
     }
     
     const user = users[0];
+
+    if (user.status && String(user.status).toLowerCase() === 'inactive') {
+      return res.status(403).json({
+        success: false,
+        message: 'This account is inactive. Please contact an administrator.'
+      });
+    }
     
     // Compare password
     const passwordMatch = await bcrypt.compare(password, user.password);
@@ -168,13 +189,28 @@ router.post('/login', async (req, res) => {
         message: 'Invalid email or password' 
       });
     }
+
+    let allowedModules = [];
+    if (user.role === 'staff') {
+      try {
+        allowedModules = user.allowed_modules
+          ? (typeof user.allowed_modules === 'string'
+            ? JSON.parse(user.allowed_modules)
+            : user.allowed_modules)
+          : [];
+        if (!Array.isArray(allowedModules)) allowedModules = [];
+      } catch {
+        allowedModules = [];
+      }
+    }
     
     // Generate JWT token
     const token = jwt.sign(
       { 
         userId: user.id, 
         email: user.email, 
-        role: user.role 
+        role: user.role,
+        allowed_modules: allowedModules
       },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
@@ -182,6 +218,7 @@ router.post('/login', async (req, res) => {
     
     // Remove password from response
     delete user.password;
+    user.allowed_modules = user.role === 'staff' ? allowedModules : null;
     
     res.json({
       success: true,

@@ -35,7 +35,13 @@ export async function ensureSchemaMigrations() {
     await addColumnIfMissing(connection, 'users', 'invoice_id', 'INT NULL');
     await addColumnIfMissing(connection, 'users', 'source_lead_id', 'INT NULL');
     await addColumnIfMissing(connection, 'users', 'admission_tests', 'TEXT NULL');
+    await addColumnIfMissing(connection, 'users', 'allowed_modules', 'TEXT NULL');
     await addColumnIfMissing(connection, 'leads', 'referred_by_name', 'VARCHAR(255) NULL');
+    try {
+      await connection.query(`ALTER TABLE users MODIFY COLUMN role VARCHAR(50) NOT NULL`);
+    } catch (err) {
+      console.warn('users.role widen:', err.message);
+    }
     await connection.query('ALTER TABLE users MODIFY COLUMN student_id VARCHAR(50) NULL').catch(() => {});
     await connection.query('ALTER TABLE users ADD UNIQUE INDEX idx_users_student_id (student_id)').catch(() => {});
     await connection.query('ALTER TABLE users MODIFY COLUMN passport_no TEXT NULL').catch(() => {});

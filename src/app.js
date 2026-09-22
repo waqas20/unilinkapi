@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import leadRoutes from './routes/LeadRoutes.js';
+import staffRoutes from './routes/StaffRoutes.js';
 import counselorRoutes from './routes/CounselorRoutes.js';
 import studentRoutes from './routes/StudentRoutes.js';
 import visitorLogRoutes from './routes/VisitorLogRoutes.js';
@@ -41,6 +42,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes - IMPORTANT: No /api prefix here since .htaccess strips it
 app.use('/auth', authRoutes);
+app.use('/', staffRoutes);
 app.use('/', leadRoutes);
 app.use('/', counselorRoutes);
 app.use('/', studentRoutes);
