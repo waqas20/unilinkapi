@@ -57,6 +57,22 @@ export async function ensureSchemaMigrations() {
 
     await connection.query('ALTER TABLE users MODIFY COLUMN dob DATE NULL').catch(() => {});
 
+    // Allow 'Other' on student_family_details.type (was ENUM Father/Mother/Sponsor only)
+    try {
+      const [familyTypeCols] = await connection.query(
+        `SHOW COLUMNS FROM student_family_details LIKE 'type'`
+      );
+      const typeDef = String(familyTypeCols[0]?.Type || '');
+      if (typeDef.toLowerCase().startsWith('enum') && !/'other'/i.test(typeDef)) {
+        await connection.query(
+          `ALTER TABLE student_family_details MODIFY COLUMN type ENUM('Father','Mother','Sponsor','Other') NOT NULL`
+        );
+        console.log('✓ student_family_details.type includes Other');
+      }
+    } catch (err) {
+      console.warn('student_family_details.type ensure Other:', err.message);
+    }
+
     const [hasSourceLeadId] = await connection.query(
       `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'source_lead_id'`

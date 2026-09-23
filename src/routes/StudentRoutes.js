@@ -102,6 +102,19 @@ const ensureFamilyPostalCodeColumn = async () => {
       }
     }
   }
+
+  // Ensure type ENUM accepts 'Other' (Parents Details 4th subsection)
+  try {
+    const [cols] = await pool.query(`SHOW COLUMNS FROM student_family_details LIKE 'type'`);
+    const typeDef = String(cols[0]?.Type || '');
+    if (typeDef.toLowerCase().startsWith('enum') && !/'other'/i.test(typeDef)) {
+      await pool.query(
+        `ALTER TABLE student_family_details MODIFY COLUMN type ENUM('Father','Mother','Sponsor','Other') NOT NULL`
+      );
+    }
+  } catch (err) {
+    console.warn('student_family_details.type ensure Other:', err.message);
+  }
 };
 
 const ensureColumn = async (table, column, definition) => {
