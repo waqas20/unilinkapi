@@ -414,7 +414,7 @@ router.get('/students/:studentId', async (req, res) => {
     );
 
     const [familyDetails] = await pool.query(
-      'SELECT * FROM student_family_details WHERE student_id = ? ORDER BY FIELD(type, "Father","Mother","Sponsor")',
+      'SELECT * FROM student_family_details WHERE student_id = ? ORDER BY FIELD(type, "Father","Mother","Sponsor","Other")',
       [studentId]
     );
 
