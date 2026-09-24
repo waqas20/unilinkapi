@@ -18,6 +18,7 @@ import FinanceRoutes from './routes/FinanceRoutes.js';
 import employees from './routes/employees.js';
 import expenses from './routes/expenses.js';
 import meetingsRouter from './routes/meetings.js';
+import portalRoutes from './routes/PortalRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,7 +57,8 @@ app.use('/', VisaEnquiryRoutes);
 app.use('/', FinanceRoutes);
 app.use('/', employees);
 app.use('/', expenses);
-app.use('/', meetingsRouter); 
+app.use('/', meetingsRouter);
+app.use('/', portalRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
