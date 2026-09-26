@@ -626,8 +626,58 @@ router.post('/leads/:leadId/follow-up', async (req, res) => {
       interest, program, instituteName,
       countriesOfInterest, countriesOther,
       qualifications, referredBy, referredByName, counsellorNotes, admissionTests,
-      purposeOfVisit
+      purposeOfVisit,
+      recordOnly
     } = req.body;
+
+    // Record-only: log the visit without editing lead fields
+    if (recordOnly) {
+      const [currentLead] = await connection.query('SELECT id, purpose_of_visit FROM leads WHERE id = ?', [leadId]);
+      if (currentLead.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, message: 'Lead record not found' });
+      }
+
+      const [followUpCount] = await connection.query(
+        'SELECT COUNT(*) as count FROM follow_ups WHERE lead_id = ?',
+        [leadId]
+      );
+      const nextFollowUpNumber = followUpCount[0].count + 1;
+      const purpose = purposeOfVisit?.trim() || null;
+
+      try {
+        await connection.query(
+          'INSERT INTO follow_ups (lead_id, follow_up_number, notes, purpose_of_visit) VALUES (?, ?, ?, ?)',
+          [leadId, nextFollowUpNumber, `Follow-up #${nextFollowUpNumber}`, purpose]
+        );
+      } catch (insertErr) {
+        if (insertErr.code !== 'ER_BAD_FIELD_ERROR') throw insertErr;
+        await connection.query(
+          'INSERT INTO follow_ups (lead_id, follow_up_number, notes) VALUES (?, ?, ?)',
+          [leadId, nextFollowUpNumber, `Follow-up #${nextFollowUpNumber}`]
+        );
+      }
+
+      try {
+        await connection.query(
+          'UPDATE leads SET purpose_of_visit = ?, is_follow_up = TRUE WHERE id = ?',
+          [purpose || currentLead[0].purpose_of_visit || null, leadId]
+        );
+      } catch (updateErr) {
+        if (updateErr.code !== 'ER_BAD_FIELD_ERROR') throw updateErr;
+        await connection.query(
+          'UPDATE leads SET is_follow_up = TRUE WHERE id = ?',
+          [leadId]
+        );
+      }
+
+      await connection.commit();
+      return res.json({
+        success: true,
+        message: 'Follow-up recorded successfully!',
+        followUpNumber: nextFollowUpNumber
+      });
+    }
     
     if (!fullName || !email || !phone || !address || !interest) {
       await connection.rollback();
