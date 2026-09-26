@@ -411,9 +411,13 @@ router.post('/leads', async (req, res) => {
       qualifications, referredBy, referredByName, counsellorNotes, admissionTests
     } = req.body;
     
-    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim() || !referredByName?.trim()) {
+    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
+    }
+    if (String(referredBy || '').trim() === 'Person Name' && !referredByName?.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Referred By (Name) is required when Person Name is selected' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
@@ -985,9 +989,13 @@ router.put('/leads/:leadId', async (req, res) => {
       referredBy, referredByName, admissionTests
     } = req.body;
     
-    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim() || !referredByName?.trim()) {
+    if (!fullName || !email || !phone || !address || !interest || !referredBy?.trim()) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
+    }
+    if (String(referredBy || '').trim() === 'Person Name' && !referredByName?.trim()) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Referred By (Name) is required when Person Name is selected' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
