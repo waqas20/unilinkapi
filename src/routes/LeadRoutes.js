@@ -302,12 +302,6 @@ const getInvoiceCountries = async (db, invoiceId, studentCountry, manualStudentC
   return Array.from(countries.values());
 };
 
-const leadCountriesMatchInvoice = (leadCountries, invoiceCountries) => {
-  if (leadCountries.length === 0) return true;
-  const invoiceSet = new Set(invoiceCountries.map(c => c.toLowerCase()));
-  return leadCountries.every(c => invoiceSet.has(c.toLowerCase()));
-};
-
 // ─── DB Migration Note ────────────────────────────────────────────────────────
 // Run the following ALTER statements once against your MySQL database if you
 // haven't already added these columns:
@@ -1147,7 +1141,7 @@ router.delete('/leads/:leadId', async (req, res) => {
   }
 });
 
-// ─── Lead invoices (match by email + country validation) ─────────────────────
+// ─── Lead invoices (match by email only) ─────────────────────────────────────
 router.get('/leads/:leadId/invoices', async (req, res) => {
   try {
     const { leadId } = req.params;
@@ -1184,7 +1178,6 @@ router.get('/leads/:leadId/invoices', async (req, res) => {
       const invoiceCountries = await getInvoiceCountries(
         pool, inv.id, inv.student_country, inv.manual_student_country
       );
-      const countriesMatch = leadCountriesMatchInvoice(leadCountries, invoiceCountries);
 
       const [linkedUser] = await pool.query(
         'SELECT id FROM users WHERE invoice_id = ? LIMIT 1',
@@ -1198,7 +1191,7 @@ router.get('/leads/:leadId/invoices', async (req, res) => {
       enriched.push({
         ...inv,
         invoice_countries: invoiceCountries,
-        countries_match: countriesMatch,
+        countries_match: true,
         is_linked_to_lead: lead.invoice_id === inv.id,
         is_linked_to_student: linkedUser.length > 0,
         is_linked_to_other_lead: linkedLead.length > 0
@@ -1222,7 +1215,7 @@ router.get('/leads/:leadId/invoices', async (req, res) => {
           linkedInvoice = {
             ...rows[0],
             invoice_countries: invoiceCountries,
-            countries_match: leadCountriesMatchInvoice(leadCountries, invoiceCountries),
+            countries_match: true,
             is_linked_to_lead: true
           };
         }
@@ -1281,20 +1274,6 @@ router.put('/leads/:leadId/payment', async (req, res) => {
     if (!invoiceEmails.includes(leadEmail)) {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'Invoice email does not match this lead' });
-    }
-
-    const leadCountries = resolveLeadCountries(lead.countries_of_interest, lead.countries_other);
-    const invoiceCountries = await getInvoiceCountries(
-      connection, invoice.id, invoice.student_country, invoice.manual_student_country
-    );
-    if (!leadCountriesMatchInvoice(leadCountries, invoiceCountries)) {
-      await connection.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Countries do not match with the lead',
-        leadCountries,
-        invoiceCountries
-      });
     }
 
     const [linkedUser] = await connection.query(
