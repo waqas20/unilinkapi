@@ -763,14 +763,40 @@ router.delete('/applications/:applicationId/documents/:documentId', async (req, 
 
 router.get('/dashboard/stats', async (req, res) => {
   try {
-    const [leadStats] = await pool.query(`SELECT COUNT(*) as total_leads FROM leads`);
+    const [leadStats] = await pool.query(`
+      SELECT
+        COUNT(*) AS total_leads,
+        SUM(
+          CASE
+            WHEN (l.is_registered = FALSE OR l.is_registered IS NULL)
+             AND LOWER(TRIM(COALESCE(l.status, ''))) = 'new'
+            THEN 1 ELSE 0
+          END
+        ) AS new_leads,
+        SUM(
+          CASE
+            WHEN (l.is_registered = FALSE OR l.is_registered IS NULL)
+             AND COALESCE(ca.counselor_count, 0) > 0
+            THEN 1 ELSE 0
+          END
+        ) AS assigned_leads
+      FROM leads l
+      LEFT JOIN (
+        SELECT lead_id, COUNT(DISTINCT counselor_id) AS counselor_count
+        FROM lead_counselor_assignments
+        GROUP BY lead_id
+      ) ca ON ca.lead_id = l.id
+      WHERE (l.is_registered = FALSE OR l.is_registered IS NULL)
+    `);
     const [studentStats] = await pool.query(`SELECT COUNT(*) as total_students FROM users WHERE role = 'client'`);
     const [applicationStats] = await pool.query(`SELECT COUNT(*) as active_applications FROM applications WHERE application_status NOT IN ('Closed', 'Rejected')`);
     const [visaStats] = await pool.query(`SELECT SUM(CASE WHEN visa_status = 'Pending' THEN 1 ELSE 0 END) as pending_visas, SUM(CASE WHEN visa_status = 'Approved' THEN 1 ELSE 0 END) as approved_visas FROM visas`);
     res.json({
       success: true,
       stats: {
-        totalLeads: leadStats[0].total_leads,
+        totalLeads: Number(leadStats[0].total_leads) || 0,
+        newLeads: Number(leadStats[0].new_leads) || 0,
+        assignedLeads: Number(leadStats[0].assigned_leads) || 0,
         totalStudents: studentStats[0].total_students,
         activeApplications: applicationStats[0].active_applications,
         pendingVisas: visaStats[0].pending_visas || 0,
