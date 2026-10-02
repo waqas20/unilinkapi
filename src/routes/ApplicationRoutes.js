@@ -761,6 +761,90 @@ router.delete('/applications/:applicationId/documents/:documentId', async (req, 
   }
 });
 
+// ============================================================
+// POST /applications/:applicationId/create-visa
+// Create a visa from application data (Assign To Visa)
+// ============================================================
+router.post('/applications/:applicationId/create-visa', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await ensureApplicationSchema();
+    await connection.beginTransaction();
+
+    const { applicationId } = req.params;
+    const [apps] = await connection.query(
+      `SELECT a.*,
+              u.name as student_full_name,
+              u.email as student_email,
+              u.mobile as student_mobile,
+              un.university_name
+       FROM applications a
+       INNER JOIN users u ON a.student_id = u.id
+       LEFT JOIN universities un ON a.university_id = un.id
+       WHERE a.id = ?`,
+      [applicationId]
+    );
+
+    if (apps.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Application not found' });
+    }
+
+    const app = apps[0];
+    const applicantName = app.student_full_name || app.student_name;
+    if (!applicantName || !app.country_id) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Application is missing student name or country required to create a visa',
+      });
+    }
+
+    const currentYear = new Date().getFullYear();
+    const [maxResult] = await connection.query(
+      `SELECT MAX(CAST(SUBSTRING(visa_id, 9) AS UNSIGNED)) as max_id
+       FROM visas WHERE visa_id LIKE ?`,
+      [`VISA${currentYear}%`]
+    );
+    const nextId = (maxResult[0].max_id || 0) + 1;
+    const visaIdCode = `VISA${currentYear}${String(nextId).padStart(3, '0')}`;
+
+    const [result] = await connection.query(
+      `INSERT INTO visas
+       (visa_id, student_id, applicant_name, applicant_email, applicant_phone, country_id,
+        visa_type, visa_status, institute)
+       VALUES (?, ?, ?, ?, ?, ?, 'Study Visa', 'In Progress', ?)`,
+      [
+        visaIdCode,
+        app.student_id || null,
+        applicantName,
+        app.student_email || null,
+        app.student_mobile || null,
+        app.country_id,
+        app.university_name || null,
+      ]
+    );
+
+    await connection.commit();
+    res.status(201).json({
+      success: true,
+      message: 'Visa created successfully from application',
+      visaId: result.insertId,
+      generatedVisaId: visaIdCode,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating visa from application:', error);
+    res.status(500).json({
+      success: false,
+      message: 'An error occurred while creating the visa',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 router.get('/dashboard/stats', async (req, res) => {
   try {
     const [leadStats] = await pool.query(`
