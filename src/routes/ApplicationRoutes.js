@@ -825,12 +825,71 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
       ]
     );
 
+    const newVisaId = result.insertId;
+
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS visa_documents (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        visa_id INT NOT NULL,
+        document_type VARCHAR(100) NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        original_name VARCHAR(255) NULL,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_visa_documents_visa (visa_id)
+      )
+    `);
+
+    // Copy matching documents: Passport -> Passport, Educational Documents -> Educational Docs
+    const DOC_TYPE_MAP = {
+      Passport: 'Passport',
+      'Educational Documents': 'Educational Docs',
+    };
+    const transferableTypes = Object.keys(DOC_TYPE_MAP);
+
+    const [appDocs] = await connection.query(
+      `SELECT document_type, file_path, original_name
+       FROM application_documents
+       WHERE application_id = ? AND document_type IN (?)`,
+      [applicationId, transferableTypes]
+    );
+
+    const visaUploadDir = path.join(__dirname, '../uploads/visa-documents');
+    if (!fs.existsSync(visaUploadDir)) {
+      fs.mkdirSync(visaUploadDir, { recursive: true });
+    }
+
+    let documentsCopied = 0;
+    for (const doc of appDocs) {
+      const visaDocType = DOC_TYPE_MAP[doc.document_type];
+      if (!visaDocType || !doc.file_path) continue;
+
+      const sourcePath = path.join(__dirname, '..', doc.file_path);
+      if (!fs.existsSync(sourcePath)) {
+        console.warn(`Skip missing application doc: ${sourcePath}`);
+        continue;
+      }
+
+      const ext = path.extname(doc.file_path) || path.extname(doc.original_name || '') || '';
+      const newFilename = `visa-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+      const destPath = path.join(visaUploadDir, newFilename);
+      fs.copyFileSync(sourcePath, destPath);
+
+      const visaFilePath = `/uploads/visa-documents/${newFilename}`;
+      await connection.query(
+        `INSERT INTO visa_documents (visa_id, document_type, file_path, original_name)
+         VALUES (?, ?, ?, ?)`,
+        [newVisaId, visaDocType, visaFilePath, doc.original_name || path.basename(doc.file_path)]
+      );
+      documentsCopied += 1;
+    }
+
     await connection.commit();
     res.status(201).json({
       success: true,
       message: 'Visa created successfully from application',
-      visaId: result.insertId,
+      visaId: newVisaId,
       generatedVisaId: visaIdCode,
+      documentsCopied,
     });
   } catch (error) {
     await connection.rollback();
