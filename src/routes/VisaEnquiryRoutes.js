@@ -250,4 +250,114 @@ router.delete('/visa-enquiries/:enquiryId', async (req, res) => {
   }
 });
 
+// ============================================================
+// POST /visa-enquiries/:enquiryId/create-visa
+// Create a visa from enquiry data (Assign To Visa)
+// Only copies name, email, phone, country — everything else defaults
+// ============================================================
+router.post('/visa-enquiries/:enquiryId/create-visa', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await ensureVisaEnquirySchema();
+    await connection.beginTransaction();
+
+    const { enquiryId } = req.params;
+    const [rows] = await connection.query('SELECT * FROM visa_enquiries WHERE id = ?', [enquiryId]);
+    if (rows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Visa enquiry not found' });
+    }
+
+    const enquiry = rows[0];
+    const applicantName = [enquiry.first_name, enquiry.middle_name, enquiry.last_name]
+      .filter((p) => p && String(p).trim())
+      .join(' ')
+      .trim();
+
+    if (!applicantName) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Enquiry is missing applicant name required to create a visa',
+      });
+    }
+
+    const intended = String(enquiry.intended_country || '').trim();
+    if (!intended) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Enquiry is missing intended country required to create a visa',
+      });
+    }
+
+    let countryId = null;
+    const [byName] = await connection.query(
+      'SELECT id FROM countries WHERE LOWER(TRIM(country_name)) = LOWER(?) LIMIT 1',
+      [intended]
+    );
+    if (byName.length > 0) {
+      countryId = byName[0].id;
+    } else if (/^\d+$/.test(intended)) {
+      const [byId] = await connection.query('SELECT id FROM countries WHERE id = ? LIMIT 1', [intended]);
+      if (byId.length > 0) countryId = byId[0].id;
+    }
+
+    if (!countryId) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Could not match intended country "${intended}" to a country in the system. Please update the enquiry country and try again.`,
+      });
+    }
+
+    const currentYear = new Date().getFullYear();
+    const [maxResult] = await connection.query(
+      `SELECT MAX(CAST(SUBSTRING(visa_id, 9) AS UNSIGNED)) as max_id
+       FROM visas WHERE visa_id LIKE ?`,
+      [`VISA${currentYear}%`]
+    );
+    const nextId = (maxResult[0].max_id || 0) + 1;
+    const visaIdCode = `VISA${currentYear}${String(nextId).padStart(3, '0')}`;
+
+    const [result] = await connection.query(
+      `INSERT INTO visas
+       (visa_id, student_id, applicant_name, applicant_email, applicant_phone, country_id,
+        visa_type, visa_status)
+       VALUES (?, NULL, ?, ?, ?, ?, 'Study Visa', 'In Progress')`,
+      [
+        visaIdCode,
+        applicantName,
+        enquiry.email || null,
+        enquiry.mobile_no || null,
+        countryId,
+      ]
+    );
+
+    await connection.commit();
+    res.status(201).json({
+      success: true,
+      message: 'Visa created successfully from enquiry',
+      visaId: result.insertId,
+      generatedVisaId: visaIdCode,
+      mapped: {
+        applicantName,
+        applicantEmail: enquiry.email || '',
+        applicantPhone: enquiry.mobile_no || '',
+        country: intended,
+      },
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating visa from enquiry:', error);
+    res.status(500).json({
+      success: false,
+      message: 'An error occurred while creating the visa',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 export default router;
