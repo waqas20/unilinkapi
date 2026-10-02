@@ -123,6 +123,18 @@ const ensureApplicationSchema = async () => {
 
 const INTAKE_SELECT = `COALESCE(NULLIF(a.intake, ''), i.intake_name) as intake_name`;
 
+/** Full student name from users.name + middle_name + surname */
+const STUDENT_FULL_NAME_SQL = `TRIM(CONCAT_WS(' ',
+  NULLIF(TRIM(u.name), ''),
+  NULLIF(TRIM(u.middle_name), ''),
+  NULLIF(TRIM(u.surname), '')
+))`;
+
+const studentFullNameFromRow = (row) => {
+  if (!row) return '';
+  return [row.name, row.middle_name, row.surname].filter((p) => p && String(p).trim()).join(' ').trim();
+};
+
 const normalizeTaggingStatus = (value) => {
   if (value === 'Received' || value === 'Tagged') return 'Tagged';
   return 'Not Tagged';
@@ -198,7 +210,7 @@ router.get('/applications', async (req, res) => {
     await ensureApplicationSchema();
     const [applications] = await pool.query(
       `SELECT a.*,
-              u.name as student_name,
+              ${STUDENT_FULL_NAME_SQL} as student_display_name,
               u.student_id as student_number,
               c.country_name,
               un.university_name,
@@ -210,7 +222,12 @@ router.get('/applications', async (req, res) => {
        LEFT JOIN intakes i ON a.intake_id = i.id
        ORDER BY a.created_at DESC`
     );
-    res.json({ success: true, applications, total: applications.length });
+    const normalized = applications.map((app) => ({
+      ...app,
+      student_name: app.student_display_name || app.student_name,
+      student_full_name: app.student_display_name || app.student_name,
+    }));
+    res.json({ success: true, applications: normalized, total: normalized.length });
   } catch (error) {
     console.error('Error fetching applications:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch applications', error: process.env.NODE_ENV === 'development' ? error.message : undefined });
@@ -255,7 +272,7 @@ router.get('/applications/:applicationId', async (req, res) => {
     const { applicationId } = req.params;
     const [applications] = await pool.query(
       `SELECT a.*,
-              u.name as student_full_name,
+              ${STUDENT_FULL_NAME_SQL} as student_display_name,
               u.student_id as student_number,
               u.email as student_email,
               u.mobile as student_mobile,
@@ -271,7 +288,17 @@ router.get('/applications/:applicationId', async (req, res) => {
       [applicationId]
     );
     if (applications.length === 0) return res.status(404).json({ success: false, message: 'Application not found' });
-    res.json({ success: true, application: applications[0] });
+    const app = applications[0];
+    const fullName = app.student_display_name || app.student_name;
+    res.json({
+      success: true,
+      application: {
+        ...app,
+        student_name: fullName,
+        student_full_name: fullName,
+      },
+    });
+    return;
   } catch (error) {
     console.error('Error fetching application:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch application', error: process.env.NODE_ENV === 'development' ? error.message : undefined });
@@ -322,7 +349,10 @@ router.post('/applications', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Application date, student, country, university, and program are required' });
     }
 
-    const [student] = await connection.query('SELECT id, name FROM users WHERE id = ? AND role = ?', [studentId, 'client']);
+    const [student] = await connection.query(
+      'SELECT id, name, middle_name, surname FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
     if (student.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Student not found' }); }
 
     const [country] = await connection.query('SELECT id FROM countries WHERE id = ?', [countryId]);
@@ -332,6 +362,7 @@ router.post('/applications', async (req, res) => {
     if (university.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'University not found or does not belong to selected country' }); }
 
     const applicationId = await generateApplicationId(connection);
+    const fullStudentName = studentFullNameFromRow(student[0]);
 
     const [result] = await connection.query(
       `INSERT INTO applications 
@@ -345,7 +376,7 @@ router.post('/applications', async (req, res) => {
         tuition_fee_status, tuition_fee_amount)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        applicationId, applicationDate, studentId, student[0].name, countryId,
+        applicationId, applicationDate, studentId, fullStudentName, countryId,
         universityId, fields.intakeValue, program,
         fields.appsSubmittedThrough, fields.appsSubmittedThroughOther,
         fields.appsTaggedThrough, fields.appsTaggedThroughOther,
@@ -392,7 +423,10 @@ router.put('/applications/:applicationId', async (req, res) => {
     const [existing] = await connection.query('SELECT id FROM applications WHERE id = ?', [applicationId]);
     if (existing.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Application not found' }); }
 
-    const [student] = await connection.query('SELECT id, name FROM users WHERE id = ? AND role = ?', [studentId, 'client']);
+    const [student] = await connection.query(
+      'SELECT id, name, middle_name, surname FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
+    );
     if (student.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Student not found' }); }
 
     const [country] = await connection.query('SELECT id FROM countries WHERE id = ?', [countryId]);
@@ -400,6 +434,8 @@ router.put('/applications/:applicationId', async (req, res) => {
 
     const [university] = await connection.query('SELECT id FROM universities WHERE id = ? AND country_id = ?', [universityId, countryId]);
     if (university.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'University not found or does not belong to selected country' }); }
+
+    const fullStudentName = studentFullNameFromRow(student[0]);
 
     await connection.query(
       `UPDATE applications 
@@ -414,7 +450,7 @@ router.put('/applications/:applicationId', async (req, res) => {
            tuition_fee_status = ?, tuition_fee_amount = ?
        WHERE id = ?`,
       [
-        String(applicationDate).split('T')[0], studentId, student[0].name, countryId,
+        String(applicationDate).split('T')[0], studentId, fullStudentName, countryId,
         universityId, fields.intakeValue, program,
         fields.appsSubmittedThrough, fields.appsSubmittedThroughOther,
         fields.appsTaggedThrough, fields.appsTaggedThroughOther,
@@ -789,7 +825,7 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
     const { applicationId } = req.params;
     const [apps] = await connection.query(
       `SELECT a.*,
-              u.name as student_full_name,
+              ${STUDENT_FULL_NAME_SQL} as student_display_name,
               u.email as student_email,
               u.mobile as student_mobile,
               un.university_name
@@ -806,7 +842,7 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
     }
 
     const app = apps[0];
-    const applicantName = app.student_full_name || app.student_name;
+    const applicantName = app.student_display_name || studentFullNameFromRow(app) || app.student_name;
     if (!applicantName || !app.country_id) {
       await connection.rollback();
       return res.status(400).json({
@@ -989,7 +1025,7 @@ router.get('/dashboard/recent-applications', async (req, res) => {
          a.program, 
          a.application_status, 
          a.created_at,
-         u.name as student_name,
+         ${STUDENT_FULL_NAME_SQL} as student_name,
          u.student_id as student_number,
          c.country_name,
          GROUP_CONCAT(DISTINCT co.name ORDER BY co.name SEPARATOR ', ') as counselor_names
@@ -1000,7 +1036,7 @@ router.get('/dashboard/recent-applications', async (req, res) => {
        LEFT JOIN counselors co ON co.id = sc.counselor_id
        GROUP BY 
          a.id, a.application_id, a.program, a.application_status, 
-         a.created_at, u.name, u.student_id, c.country_name
+         a.created_at, u.name, u.middle_name, u.surname, u.student_id, c.country_name
        ORDER BY a.created_at DESC
        LIMIT 5`
     );

@@ -1490,12 +1490,18 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
     }
 
     const [student] = await connection.query(
-      'SELECT id, name, student_id FROM users WHERE id = ? AND role = ?', [studentId, 'client']
+      'SELECT id, name, middle_name, surname, student_id FROM users WHERE id = ? AND role = ?',
+      [studentId, 'client']
     );
     if (student.length === 0) {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Student not found' });
     }
+
+    const fullStudentName = [student[0].name, student[0].middle_name, student[0].surname]
+      .filter((p) => p && String(p).trim())
+      .join(' ')
+      .trim();
 
     let createdCount = 0;
     const currentDate = new Date().toISOString().split('T')[0];
@@ -1539,7 +1545,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
           `INSERT INTO applications 
            (application_id, application_date, student_id, student_name, country_id, university_id, application_status, tagging_status)
            VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Not Tagged')`,
-          [applicationId, currentDate, studentId, student[0].name, uni.country_id, universityId]
+          [applicationId, currentDate, studentId, fullStudentName, uni.country_id, universityId]
         );
         createdCount++;
       }
@@ -1571,7 +1577,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
           `INSERT INTO applications 
            (application_id, application_date, student_id, student_name, country_id, application_status, tagging_status)
            VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Tagged')`,
-          [applicationId, currentDate, studentId, student[0].name, countryId]
+          [applicationId, currentDate, studentId, fullStudentName, countryId]
         );
         createdCount++;
       }
