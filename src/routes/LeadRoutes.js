@@ -7,6 +7,7 @@ import fs from 'fs';
 import pool, { ensureSchemaMigrations } from '../config/db.js';
 import { claimStudentRegistrationId } from '../utils/studentRegistrationId.js';
 import { qualificationsToEducationRows } from '../utils/qualificationsToEducation.js';
+import { ensureUploadSubdir } from '../config/uploads.js';
 
 const router = express.Router();
 
@@ -16,11 +17,7 @@ const __dirname = path.dirname(__filename);
 // Configure multer for image uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, '../uploads/meeting-notes');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
+    cb(null, ensureUploadSubdir('meeting-notes'));
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);

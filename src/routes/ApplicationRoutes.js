@@ -4,6 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { ensureUploadSubdir, absoluteFromPublicPath } from '../config/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,9 +28,7 @@ const router = express.Router();
 // Configure multer
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, '../uploads/application-forms');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-    cb(null, uploadDir);
+    cb(null, ensureUploadSubdir('application-forms'));
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -494,7 +493,7 @@ router.delete('/applications/:applicationId', async (req, res) => {
 
     const deleteFile = (filePath) => {
       if (filePath) {
-        const full = path.join(__dirname, '..', filePath);
+        const full = absoluteFromPublicPath(filePath);
         if (fs.existsSync(full)) fs.unlinkSync(full);
       }
     };
@@ -543,7 +542,7 @@ router.post('/applications/:applicationId/manual-form', upload.single('manualFor
     }
 
     if (application[0].manual_form_path) {
-      const old = path.join(__dirname, '..', application[0].manual_form_path);
+      const old = absoluteFromPublicPath(application[0].manual_form_path);
       if (fs.existsSync(old)) fs.unlinkSync(old);
     }
 
@@ -597,7 +596,7 @@ router.delete('/applications/:applicationId/manual-form', async (req, res) => {
     if (application.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Application not found' }); }
     if (!application[0].manual_form_path) { await connection.rollback(); return res.status(404).json({ success: false, message: 'No manual form found' }); }
 
-    const filePath = path.join(__dirname, '..', application[0].manual_form_path);
+    const filePath = absoluteFromPublicPath(application[0].manual_form_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
     await connection.query('UPDATE applications SET manual_form_path = NULL, manual_form_uploaded_at = NULL WHERE id = ?', [applicationId]);
@@ -633,7 +632,7 @@ router.post('/applications/:applicationId/offer-letter', upload.single('offerLet
     }
 
     if (application[0].offer_letter_path) {
-      const old = path.join(__dirname, '..', application[0].offer_letter_path);
+      const old = absoluteFromPublicPath(application[0].offer_letter_path);
       if (fs.existsSync(old)) fs.unlinkSync(old);
     }
 
@@ -687,7 +686,7 @@ router.delete('/applications/:applicationId/offer-letter', async (req, res) => {
     if (application.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Application not found' }); }
     if (!application[0].offer_letter_path) { await connection.rollback(); return res.status(404).json({ success: false, message: 'No offer letter found' }); }
 
-    const filePath = path.join(__dirname, '..', application[0].offer_letter_path);
+    const filePath = absoluteFromPublicPath(application[0].offer_letter_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
     await connection.query('UPDATE applications SET offer_letter_path = NULL, offer_letter_uploaded_at = NULL WHERE id = ?', [applicationId]);
@@ -783,7 +782,7 @@ router.delete('/applications/:applicationId/documents/:documentId', async (req, 
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Document not found' });
     }
-    const full = path.join(__dirname, '..', docs[0].file_path);
+    const full = absoluteFromPublicPath(docs[0].file_path);
     if (fs.existsSync(full)) fs.unlinkSync(full);
     await connection.query('DELETE FROM application_documents WHERE id = ?', [documentId]);
     await connection.commit();
@@ -893,7 +892,7 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
       [applicationId]
     );
 
-    const visaUploadDir = path.join(__dirname, '../uploads/visa-documents');
+    const visaUploadDir = ensureUploadSubdir('visa-documents');
     if (!fs.existsSync(visaUploadDir)) {
       fs.mkdirSync(visaUploadDir, { recursive: true });
     }
@@ -905,10 +904,7 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
       const visaType = DOC_TYPE_MAP[doc.document_type];
       if (!visaType) continue;
 
-      const srcRel = String(doc.file_path || '').replace(/^\/+/, '');
-      if (!srcRel) continue;
-
-      const srcFull = path.join(__dirname, '..', srcRel);
+      const srcFull = absoluteFromPublicPath(doc.file_path);
       if (!fs.existsSync(srcFull)) {
         console.warn(`Assign To Visa: source file missing for application doc #${doc.id}: ${srcFull}`);
         continue;

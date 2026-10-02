@@ -4,6 +4,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { ensureUploadSubdir, absoluteFromPublicPath } from '../config/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +14,7 @@ const router = express.Router();
 // Serve uploaded files
 router.get('/uploads/visa-documents/:filename', (req, res) => {
   const { filename } = req.params;
-  const filePath = path.join(__dirname, '../uploads/visa-documents', filename);
+  const filePath = path.join(ensureUploadSubdir('visa-documents'), filename);
   if (fs.existsSync(filePath)) {
     res.sendFile(filePath);
   } else {
@@ -24,11 +25,7 @@ router.get('/uploads/visa-documents/:filename', (req, res) => {
 // Configure multer for visa document uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, '../uploads/visa-documents');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
+    cb(null, ensureUploadSubdir('visa-documents'));
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -515,7 +512,7 @@ router.delete('/visas/:visaId', async (req, res) => {
 
     const deleteFile = (filePath) => {
       if (filePath) {
-        const fullPath = path.join(__dirname, '..', filePath);
+        const fullPath = absoluteFromPublicPath(filePath);
         if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
       }
     };
@@ -615,7 +612,7 @@ router.delete('/visas/:visaId/documents/:documentId', async (req, res) => {
       await connection.rollback();
       return res.status(404).json({ success: false, message: 'Document not found' });
     }
-    const full = path.join(__dirname, '..', docs[0].file_path);
+    const full = absoluteFromPublicPath(docs[0].file_path);
     if (fs.existsSync(full)) fs.unlinkSync(full);
     await connection.query('DELETE FROM visa_documents WHERE id = ?', [documentId]);
     await connection.commit();
@@ -657,7 +654,7 @@ router.delete('/visas/:visaId/fee-receipts/:receiptId', async (req, res) => {
     const [receipt] = await connection.query('SELECT file_path FROM visa_fee_receipts WHERE id = ? AND visa_id = ?', [receiptId, visaId]);
     if (receipt.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Fee receipt not found' }); }
     await connection.query('DELETE FROM visa_fee_receipts WHERE id = ? AND visa_id = ?', [receiptId, visaId]);
-    const filePath = path.join(__dirname, '..', receipt[0].file_path);
+    const filePath = absoluteFromPublicPath(receipt[0].file_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     await connection.commit();
     res.json({ success: true, message: 'Fee receipt deleted successfully' });
@@ -676,7 +673,7 @@ router.post('/visas/:visaId/birth-certificate', upload.single('birthCertificate'
     if (!req.file) { await connection.rollback(); return res.status(400).json({ success: false, message: 'No file uploaded' }); }
     const [visa] = await connection.query('SELECT birth_certificate_path FROM visas WHERE id = ?', [visaId]);
     if (visa.length === 0) { await connection.rollback(); if (req.file) fs.unlinkSync(req.file.path); return res.status(404).json({ success: false, message: 'Visa not found' }); }
-    if (visa[0].birth_certificate_path) { const old = path.join(__dirname, '..', visa[0].birth_certificate_path); if (fs.existsSync(old)) fs.unlinkSync(old); }
+    if (visa[0].birth_certificate_path) { const old = absoluteFromPublicPath(visa[0].birth_certificate_path); if (fs.existsSync(old)) fs.unlinkSync(old); }
     const filePath = `/uploads/visa-documents/${req.file.filename}`;
     await connection.query('UPDATE visas SET birth_certificate_path = ? WHERE id = ?', [filePath, visaId]);
     await connection.commit();
@@ -697,7 +694,7 @@ router.delete('/visas/:visaId/birth-certificate', async (req, res) => {
     const [visa] = await connection.query('SELECT birth_certificate_path FROM visas WHERE id = ?', [visaId]);
     if (visa.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Visa not found' }); }
     if (!visa[0].birth_certificate_path) { await connection.rollback(); return res.status(404).json({ success: false, message: 'No birth certificate found' }); }
-    const filePath = path.join(__dirname, '..', visa[0].birth_certificate_path);
+    const filePath = absoluteFromPublicPath(visa[0].birth_certificate_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     await connection.query('UPDATE visas SET birth_certificate_path = NULL WHERE id = ?', [visaId]);
     await connection.commit();
@@ -736,7 +733,7 @@ router.delete('/visas/:visaId/financial-documents/:documentId', async (req, res)
     const [document] = await connection.query('SELECT file_path FROM visa_financial_documents WHERE id = ? AND visa_id = ?', [documentId, visaId]);
     if (document.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Financial document not found' }); }
     await connection.query('DELETE FROM visa_financial_documents WHERE id = ? AND visa_id = ?', [documentId, visaId]);
-    const filePath = path.join(__dirname, '..', document[0].file_path);
+    const filePath = absoluteFromPublicPath(document[0].file_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     await connection.commit();
     res.json({ success: true, message: 'Financial document deleted successfully' });
@@ -755,7 +752,7 @@ router.post('/visas/:visaId/travel-history', upload.single('travelHistory'), asy
     if (!req.file) { await connection.rollback(); return res.status(400).json({ success: false, message: 'No file uploaded' }); }
     const [visa] = await connection.query('SELECT travel_history_path FROM visas WHERE id = ?', [visaId]);
     if (visa.length === 0) { await connection.rollback(); if (req.file) fs.unlinkSync(req.file.path); return res.status(404).json({ success: false, message: 'Visa not found' }); }
-    if (visa[0].travel_history_path) { const old = path.join(__dirname, '..', visa[0].travel_history_path); if (fs.existsSync(old)) fs.unlinkSync(old); }
+    if (visa[0].travel_history_path) { const old = absoluteFromPublicPath(visa[0].travel_history_path); if (fs.existsSync(old)) fs.unlinkSync(old); }
     const filePath = `/uploads/visa-documents/${req.file.filename}`;
     await connection.query('UPDATE visas SET travel_history_path = ? WHERE id = ?', [filePath, visaId]);
     await connection.commit();
@@ -776,7 +773,7 @@ router.delete('/visas/:visaId/travel-history', async (req, res) => {
     const [visa] = await connection.query('SELECT travel_history_path FROM visas WHERE id = ?', [visaId]);
     if (visa.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Visa not found' }); }
     if (!visa[0].travel_history_path) { await connection.rollback(); return res.status(404).json({ success: false, message: 'No travel history found' }); }
-    const filePath = path.join(__dirname, '..', visa[0].travel_history_path);
+    const filePath = absoluteFromPublicPath(visa[0].travel_history_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     await connection.query('UPDATE visas SET travel_history_path = NULL WHERE id = ?', [visaId]);
     await connection.commit();
@@ -814,7 +811,7 @@ router.delete('/visas/:visaId/passport-photos/:photoId', async (req, res) => {
     const [photo] = await connection.query('SELECT file_path FROM visa_passport_photos WHERE id = ? AND visa_id = ?', [photoId, visaId]);
     if (photo.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Passport photo not found' }); }
     await connection.query('DELETE FROM visa_passport_photos WHERE id = ? AND visa_id = ?', [photoId, visaId]);
-    const filePath = path.join(__dirname, '..', photo[0].file_path);
+    const filePath = absoluteFromPublicPath(photo[0].file_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     await connection.commit();
     res.json({ success: true, message: 'Passport photo deleted successfully' });

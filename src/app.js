@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { UPLOADS_ROOT } from './config/uploads.js';
 import authRoutes from './routes/auth.js';
 import leadRoutes from './routes/LeadRoutes.js';
 import staffRoutes from './routes/StaffRoutes.js';
@@ -20,9 +20,6 @@ import expenses from './routes/expenses.js';
 import meetingsRouter from './routes/meetings.js';
 import portalRoutes from './routes/PortalRoutes.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 
 // Simple CORS - same domain now, but keep for local development
@@ -39,7 +36,19 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+if (!fs.existsSync(UPLOADS_ROOT)) {
+  fs.mkdirSync(UPLOADS_ROOT, { recursive: true });
+}
+
+// Serve uploaded files from persistent UPLOAD_DIR when set (Railway volume),
+// otherwise backend/src/uploads. Missing files get a clear 404 (not "Route not found").
+app.use('/uploads', express.static(UPLOADS_ROOT, { fallthrough: true }));
+app.use('/uploads', (req, res) => {
+  res.status(404).json({
+    message: 'File not found. Uploaded files may have been lost after a server redeploy. Please re-upload the document.',
+    path: req.originalUrl,
+  });
+});
 
 // Routes - IMPORTANT: No /api prefix here since .htaccess strips it
 app.use('/auth', authRoutes);

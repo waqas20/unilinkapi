@@ -6,6 +6,7 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { ensureUploadSubdir, absoluteFromPublicPath } from '../config/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,11 +16,7 @@ const router = express.Router();
 // Configure multer for document uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, '../uploads/student-documents');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
+    cb(null, ensureUploadSubdir('student-documents'));
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -44,11 +41,7 @@ const upload = multer({
 
 const profileStorage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, '../uploads/student-profiles');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
+    cb(null, ensureUploadSubdir('student-profiles'));
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -1037,7 +1030,7 @@ router.post('/students/:studentId/manual-form', upload.single('manualForm'), asy
     }
 
     if (student[0].manual_form_path) {
-      const oldFilePath = path.join(__dirname, '..', student[0].manual_form_path);
+      const oldFilePath = absoluteFromPublicPath(student[0].manual_form_path);
       if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
     }
 
@@ -1101,7 +1094,7 @@ router.delete('/students/:studentId/manual-form', async (req, res) => {
       return res.status(404).json({ success: false, message: 'No manual form found' });
     }
 
-    const filePath = path.join(__dirname, '..', student[0].manual_form_path);
+    const filePath = absoluteFromPublicPath(student[0].manual_form_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
     await connection.query(
@@ -1155,7 +1148,7 @@ router.post('/students/:studentId/profile-picture', profileUpload.single('profil
     );
 
     if (oldPath) {
-      const absoluteOld = path.join(__dirname, '..', oldPath);
+      const absoluteOld = absoluteFromPublicPath(oldPath);
       if (fs.existsSync(absoluteOld)) {
         try { fs.unlinkSync(absoluteOld); } catch { /* ignore */ }
       }
@@ -1194,7 +1187,7 @@ router.delete('/students/:studentId/profile-picture', async (req, res) => {
     await connection.query('UPDATE users SET profile_picture = NULL WHERE id = ?', [studentId]);
 
     if (oldPath) {
-      const absoluteOld = path.join(__dirname, '..', oldPath);
+      const absoluteOld = absoluteFromPublicPath(oldPath);
       if (fs.existsSync(absoluteOld)) {
         try { fs.unlinkSync(absoluteOld); } catch { /* ignore */ }
       }
@@ -1306,7 +1299,7 @@ router.delete('/students/:studentId/documents/:documentId', async (req, res) => 
       'DELETE FROM student_documents WHERE id = ? AND student_id = ?', [documentId, studentId]
     );
 
-    const filePath = path.join(__dirname, '..', document[0].file_path);
+    const filePath = absoluteFromPublicPath(document[0].file_path);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
     await connection.commit();
