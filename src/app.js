@@ -45,7 +45,7 @@ if (!fs.existsSync(UPLOADS_ROOT)) {
 app.use('/uploads', express.static(UPLOADS_ROOT, { fallthrough: true }));
 app.use('/uploads', (req, res) => {
   res.status(404).json({
-    message: 'File not found. Uploaded files may have been lost after a server redeploy. Please re-upload the document.',
+    message: 'As this is a test server, files are automatically deleted after every new deployment to the new server due to storage restrictions, please upgrade to live server for permanent storage.',
     path: req.originalUrl,
   });
 });

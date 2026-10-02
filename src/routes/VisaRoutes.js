@@ -18,7 +18,10 @@ router.get('/uploads/visa-documents/:filename', (req, res) => {
   if (fs.existsSync(filePath)) {
     res.sendFile(filePath);
   } else {
-    res.status(404).json({ success: false, message: 'File not found' });
+    res.status(404).json({
+      success: false,
+      message: 'As this is a test server, files are automatically deleted after every new deployment to the new server due to storage restrictions, please upgrade to live server for permanent storage.',
+    });
   }
 });
 
