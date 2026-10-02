@@ -764,12 +764,27 @@ router.delete('/applications/:applicationId/documents/:documentId', async (req, 
 // ============================================================
 // POST /applications/:applicationId/create-visa
 // Create a visa from application data (Assign To Visa)
+// Copies Passport + Educational Documents onto the new visa
 // ============================================================
 router.post('/applications/:applicationId/create-visa', async (req, res) => {
   const connection = await pool.getConnection();
+  const copiedFiles = []; // track for cleanup on failure
   try {
     await ensureApplicationSchema();
     await connection.beginTransaction();
+
+    // Ensure visa_documents table exists (normally created by VisaRoutes)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS visa_documents (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        visa_id INT NOT NULL,
+        document_type VARCHAR(100) NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        original_name VARCHAR(255) NULL,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_visa_documents_visa (visa_id)
+      )
+    `);
 
     const { applicationId } = req.params;
     const [apps] = await connection.query(
@@ -827,30 +842,19 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
 
     const newVisaId = result.insertId;
 
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS visa_documents (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        visa_id INT NOT NULL,
-        document_type VARCHAR(100) NOT NULL,
-        file_path VARCHAR(500) NOT NULL,
-        original_name VARCHAR(255) NULL,
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_visa_documents_visa (visa_id)
-      )
-    `);
-
-    // Copy matching documents: Passport -> Passport, Educational Documents -> Educational Docs
+    // Only transfer matching document types (application label -> visa label)
     const DOC_TYPE_MAP = {
-      Passport: 'Passport',
+      'Passport': 'Passport',
       'Educational Documents': 'Educational Docs',
     };
-    const transferableTypes = Object.keys(DOC_TYPE_MAP);
 
     const [appDocs] = await connection.query(
-      `SELECT document_type, file_path, original_name
+      `SELECT id, document_type, file_path, original_name
        FROM application_documents
-       WHERE application_id = ? AND document_type IN (?)`,
-      [applicationId, transferableTypes]
+       WHERE application_id = ?
+         AND document_type IN ('Passport', 'Educational Documents')
+       ORDER BY uploaded_at ASC`,
+      [applicationId]
     );
 
     const visaUploadDir = path.join(__dirname, '../uploads/visa-documents');
@@ -858,29 +862,49 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
       fs.mkdirSync(visaUploadDir, { recursive: true });
     }
 
-    let documentsCopied = 0;
-    for (const doc of appDocs) {
-      const visaDocType = DOC_TYPE_MAP[doc.document_type];
-      if (!visaDocType || !doc.file_path) continue;
+    let transferredCount = 0;
+    const transferred = [];
 
-      const sourcePath = path.join(__dirname, '..', doc.file_path);
-      if (!fs.existsSync(sourcePath)) {
-        console.warn(`Skip missing application doc: ${sourcePath}`);
+    for (const doc of appDocs) {
+      const visaType = DOC_TYPE_MAP[doc.document_type];
+      if (!visaType) continue;
+
+      const srcRel = String(doc.file_path || '').replace(/^\/+/, '');
+      if (!srcRel) continue;
+
+      const srcFull = path.join(__dirname, '..', srcRel);
+      if (!fs.existsSync(srcFull)) {
+        console.warn(`Assign To Visa: source file missing for application doc #${doc.id}: ${srcFull}`);
         continue;
       }
 
-      const ext = path.extname(doc.file_path) || path.extname(doc.original_name || '') || '';
+      const ext = path.extname(doc.original_name || srcFull) || path.extname(srcFull) || '';
       const newFilename = `visa-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-      const destPath = path.join(visaUploadDir, newFilename);
-      fs.copyFileSync(sourcePath, destPath);
+      const destFull = path.join(visaUploadDir, newFilename);
+      const destPath = `/uploads/visa-documents/${newFilename}`;
 
-      const visaFilePath = `/uploads/visa-documents/${newFilename}`;
+      fs.copyFileSync(srcFull, destFull);
+      copiedFiles.push(destFull);
+
+      // Verify copy actually landed
+      if (!fs.existsSync(destFull)) {
+        console.warn(`Assign To Visa: copy failed for application doc #${doc.id}`);
+        continue;
+      }
+
       await connection.query(
         `INSERT INTO visa_documents (visa_id, document_type, file_path, original_name)
          VALUES (?, ?, ?, ?)`,
-        [newVisaId, visaDocType, visaFilePath, doc.original_name || path.basename(doc.file_path)]
+        [newVisaId, visaType, destPath, doc.original_name || path.basename(srcFull)]
       );
-      documentsCopied += 1;
+
+      transferredCount += 1;
+      transferred.push({
+        from: doc.document_type,
+        to: visaType,
+        original_name: doc.original_name || path.basename(srcFull),
+        file_path: destPath,
+      });
     }
 
     await connection.commit();
@@ -889,10 +913,14 @@ router.post('/applications/:applicationId/create-visa', async (req, res) => {
       message: 'Visa created successfully from application',
       visaId: newVisaId,
       generatedVisaId: visaIdCode,
-      documentsCopied,
+      transferredDocuments: transferredCount,
+      transferred,
     });
   } catch (error) {
     await connection.rollback();
+    for (const f of copiedFiles) {
+      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) { /* ignore */ }
+    }
     console.error('Error creating visa from application:', error);
     res.status(500).json({
       success: false,
