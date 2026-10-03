@@ -304,6 +304,7 @@ router.post('/visas', async (req, res) => {
     const resolvedAppointmentDate = visaAppointment === 'Yes' ? (visaAppointmentDate || null) : null;
     const resolvedBiometricsDate = biometrics === 'Yes' ? (biometricsAppointmentDate || null) : null;
     const resolvedMedicalDate = medicalBooked === 'Yes' ? (medicalAppointmentDate || null) : null;
+    const resolvedMedicalTest = medicalBooked === 'Yes' ? (medicalTest || null) : null;
 
     const [result] = await connection.query(
       `INSERT INTO visas 
@@ -335,7 +336,7 @@ router.post('/visas', async (req, res) => {
         submittedBy || null,
         biometrics || null,
         resolvedBiometricsDate,
-        medicalTest || null,
+        resolvedMedicalTest,
         medicalBooked || null,
         resolvedMedicalDate,
         accommodationBooked || null,
@@ -433,6 +434,7 @@ router.put('/visas/:visaId', async (req, res) => {
     const resolvedAppointmentDate = visaAppointment === 'Yes' ? (visaAppointmentDate || null) : null;
     const resolvedBiometricsDate = biometrics === 'Yes' ? (biometricsAppointmentDate || null) : null;
     const resolvedMedicalDate = medicalBooked === 'Yes' ? (medicalAppointmentDate || null) : null;
+    const resolvedMedicalTest = medicalBooked === 'Yes' ? (medicalTest || null) : null;
 
     await connection.query(
       `UPDATE visas SET
@@ -466,7 +468,7 @@ router.put('/visas/:visaId', async (req, res) => {
         submittedBy || null,
         biometrics || null,
         resolvedBiometricsDate,
-        medicalTest || null,
+        resolvedMedicalTest,
         medicalBooked || null,
         resolvedMedicalDate,
         accommodationBooked || null,
