@@ -69,6 +69,8 @@ const ensureVisaSchema = async () => {
     ['medical_test', 'VARCHAR(255) NULL'],
     ['medical_booked', 'VARCHAR(50) NULL'],
     ['medical_appointment_date', 'DATE NULL'],
+    ['bank_statement_requirement', 'VARCHAR(50) NULL'],
+    ['bank_statement_amount_required', 'VARCHAR(255) NULL'],
     ['accommodation_booked', 'VARCHAR(10) NULL'],
     ['visa_website_id', 'VARCHAR(255) NULL'],
   ];
@@ -284,6 +286,8 @@ router.post('/visas', async (req, res) => {
       medicalTest,
       medicalBooked,
       medicalAppointmentDate,
+      bankStatementRequirement,
+      bankStatementAmountRequired,
       accommodationBooked,
       visaLink,
       visaWebsiteId,
@@ -305,6 +309,7 @@ router.post('/visas', async (req, res) => {
     const resolvedBiometricsDate = biometrics === 'Yes' ? (biometricsAppointmentDate || null) : null;
     const resolvedMedicalDate = medicalBooked === 'Yes' ? (medicalAppointmentDate || null) : null;
     const resolvedMedicalTest = medicalBooked === 'Yes' ? (medicalTest || null) : null;
+    const resolvedBankAmount = bankStatementRequirement === 'Yes' ? (bankStatementAmountRequired || null) : null;
 
     const [result] = await connection.query(
       `INSERT INTO visas 
@@ -313,9 +318,10 @@ router.post('/visas', async (req, res) => {
         main_applicant_institute, main_applicant_visa_category, main_applicant_visa_status,
         visa_category, institute, submission_date, submitted_by, biometrics,
         biometrics_appointment_date, medical_test, medical_booked, medical_appointment_date,
+        bank_statement_requirement, bank_statement_amount_required,
         accommodation_booked, visa_link, visa_website_id, visa_password,
         visa_appointment, visa_appointment_date)
-       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         visaIdCode,
         applicantName,
@@ -339,6 +345,8 @@ router.post('/visas', async (req, res) => {
         resolvedMedicalTest,
         medicalBooked || null,
         resolvedMedicalDate,
+        bankStatementRequirement || null,
+        resolvedBankAmount,
         accommodationBooked || null,
         visaLink || null,
         visaWebsiteId || null,
@@ -405,6 +413,8 @@ router.put('/visas/:visaId', async (req, res) => {
       medicalTest,
       medicalBooked,
       medicalAppointmentDate,
+      bankStatementRequirement,
+      bankStatementAmountRequired,
       accommodationBooked,
       visaLink,
       visaWebsiteId,
@@ -435,6 +445,7 @@ router.put('/visas/:visaId', async (req, res) => {
     const resolvedBiometricsDate = biometrics === 'Yes' ? (biometricsAppointmentDate || null) : null;
     const resolvedMedicalDate = medicalBooked === 'Yes' ? (medicalAppointmentDate || null) : null;
     const resolvedMedicalTest = medicalBooked === 'Yes' ? (medicalTest || null) : null;
+    const resolvedBankAmount = bankStatementRequirement === 'Yes' ? (bankStatementAmountRequired || null) : null;
 
     await connection.query(
       `UPDATE visas SET
@@ -446,6 +457,7 @@ router.put('/visas/:visaId', async (req, res) => {
          institute = ?, submission_date = ?, submitted_by = ?,
          biometrics = ?, biometrics_appointment_date = ?,
          medical_test = ?, medical_booked = ?, medical_appointment_date = ?,
+         bank_statement_requirement = ?, bank_statement_amount_required = ?,
          accommodation_booked = ?, visa_link = ?, visa_website_id = ?,
          visa_password = ?, visa_appointment = ?, visa_appointment_date = ?
        WHERE id = ?`,
@@ -471,6 +483,8 @@ router.put('/visas/:visaId', async (req, res) => {
         resolvedMedicalTest,
         medicalBooked || null,
         resolvedMedicalDate,
+        bankStatementRequirement || null,
+        resolvedBankAmount,
         accommodationBooked || null,
         visaLink || null,
         visaWebsiteId || null,
