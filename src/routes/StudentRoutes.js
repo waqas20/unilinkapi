@@ -7,6 +7,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { ensureUploadSubdir, absoluteFromPublicPath } from '../config/uploads.js';
+import {
+  transferStudentDocsToApplication,
+  cleanupCopiedFiles,
+} from '../utils/transferStudentDocsToApplication.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1466,15 +1470,6 @@ router.post('/students/:studentId/meetings', async (req, res) => {
 // deriving country from the university's country_id.
 // Falls back to countryIds for backward compatibility if universityIds not provided.
 
-// Student document_name -> application document_type (Assign To Application)
-const STUDENT_TO_APP_DOC_MAP = {
-  'Passport': 'Passport',
-  'Updated CV / Resume': 'CV',
-  'English Proficiency Test': 'English Proficiency Test',
-  'Extracurricular Certificates': 'Extra Curriculum Certificates',
-  'Essay or SOP': 'Essay/SOP',
-};
-
 router.post('/students/:studentId/create-applications', async (req, res) => {
   const connection = await pool.getConnection();
   const copiedFiles = [];
@@ -1505,69 +1500,6 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
       .filter((p) => p && String(p).trim())
       .join(' ')
       .trim();
-
-    await connection.query(`
-      CREATE TABLE IF NOT EXISTS application_documents (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        application_id INT NOT NULL,
-        document_type VARCHAR(100) NOT NULL,
-        file_path VARCHAR(500) NOT NULL,
-        original_name VARCHAR(255) NULL,
-        uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_application_documents_app (application_id)
-      )
-    `);
-
-    const transferableNames = Object.keys(STUDENT_TO_APP_DOC_MAP);
-    const [studentDocs] = await connection.query(
-      `SELECT id, document_name, document_type, file_path
-       FROM student_documents
-       WHERE student_id = ?
-         AND document_name IN (?)
-       ORDER BY display_order ASC, uploaded_at ASC`,
-      [studentId, transferableNames]
-    );
-
-    const appUploadDir = ensureUploadSubdir('application-forms');
-    if (!fs.existsSync(appUploadDir)) {
-      fs.mkdirSync(appUploadDir, { recursive: true });
-    }
-
-    const transferDocsToApplication = async (newAppDbId) => {
-      let transferred = 0;
-      for (const doc of studentDocs) {
-        const appType = STUDENT_TO_APP_DOC_MAP[doc.document_name];
-        if (!appType) continue;
-
-        const srcFull = absoluteFromPublicPath(doc.file_path);
-        if (!fs.existsSync(srcFull)) {
-          console.warn(`Assign To Application: source file missing for student doc #${doc.id}: ${srcFull}`);
-          continue;
-        }
-
-        const ext = path.extname(doc.file_path || srcFull) || '';
-        const newFilename = `form-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-        const destFull = path.join(appUploadDir, newFilename);
-        const destPath = `/uploads/application-forms/${newFilename}`;
-
-        fs.copyFileSync(srcFull, destFull);
-        copiedFiles.push(destFull);
-
-        if (!fs.existsSync(destFull)) {
-          console.warn(`Assign To Application: copy failed for student doc #${doc.id}`);
-          continue;
-        }
-
-        const originalName = path.basename(doc.file_path || srcFull);
-        await connection.query(
-          `INSERT INTO application_documents (application_id, document_type, file_path, original_name)
-           VALUES (?, ?, ?, ?)`,
-          [newAppDbId, appType, destPath, originalName]
-        );
-        transferred += 1;
-      }
-      return transferred;
-    };
 
     let createdCount = 0;
     let transferredDocuments = 0;
@@ -1614,7 +1546,13 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
            VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Not Tagged')`,
           [applicationId, currentDate, studentId, fullStudentName, uni.country_id, universityId]
         );
-        transferredDocuments += await transferDocsToApplication(insertResult.insertId);
+        const transferResult = await transferStudentDocsToApplication(
+          connection,
+          studentId,
+          insertResult.insertId
+        );
+        copiedFiles.push(...transferResult.copiedFiles);
+        transferredDocuments += transferResult.transferred;
         createdCount++;
       }
     } else {
@@ -1647,7 +1585,13 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
            VALUES (?, ?, ?, ?, ?, 'Pending', 'Not Tagged')`,
           [applicationId, currentDate, studentId, fullStudentName, countryId]
         );
-        transferredDocuments += await transferDocsToApplication(insertResult.insertId);
+        const transferResult = await transferStudentDocsToApplication(
+          connection,
+          studentId,
+          insertResult.insertId
+        );
+        copiedFiles.push(...transferResult.copiedFiles);
+        transferredDocuments += transferResult.transferred;
         createdCount++;
       }
     }
@@ -1662,9 +1606,7 @@ router.post('/students/:studentId/create-applications', async (req, res) => {
 
   } catch (error) {
     await connection.rollback();
-    for (const f of copiedFiles) {
-      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (_) { /* ignore */ }
-    }
+    cleanupCopiedFiles(copiedFiles);
     console.error('Error creating applications:', error);
     res.status(500).json({ success: false, message: 'An error occurred while creating applications' });
   } finally {

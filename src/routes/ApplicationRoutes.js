@@ -5,6 +5,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { ensureUploadSubdir, absoluteFromPublicPath } from '../config/uploads.js';
+import {
+  transferStudentDocsToApplication,
+  cleanupCopiedFiles,
+} from '../utils/transferStudentDocsToApplication.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -336,6 +340,7 @@ router.get('/applications/student/:studentId', async (req, res) => {
 // ============================================================
 router.post('/applications', async (req, res) => {
   const connection = await pool.getConnection();
+  let copiedFiles = [];
   try {
     await ensureApplicationSchema();
     await connection.beginTransaction();
@@ -388,11 +393,25 @@ router.post('/applications', async (req, res) => {
       ]
     );
 
+    const transferResult = await transferStudentDocsToApplication(
+      connection,
+      studentId,
+      result.insertId
+    );
+    copiedFiles = transferResult.copiedFiles;
+
     await connection.commit();
-    res.status(201).json({ success: true, message: 'Application created successfully', applicationId: result.insertId, generatedApplicationId: applicationId });
+    res.status(201).json({
+      success: true,
+      message: 'Application created successfully',
+      applicationId: result.insertId,
+      generatedApplicationId: applicationId,
+      transferredDocuments: transferResult.transferred,
+    });
 
   } catch (error) {
     await connection.rollback();
+    cleanupCopiedFiles(copiedFiles);
     console.error('Error creating application:', error);
     res.status(500).json({ success: false, message: 'An error occurred while creating the application', error: process.env.NODE_ENV === 'development' ? error.message : undefined });
   } finally {
