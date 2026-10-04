@@ -5,6 +5,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { ensureUploadSubdir, absoluteFromPublicPath } from '../config/uploads.js';
+import {
+  transferStudentDocsToVisa,
+  transferVisaDocsToVisa,
+  cleanupCopiedFiles,
+} from '../utils/transferDocsToVisa.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -259,6 +264,7 @@ router.get('/visas/:visaId', async (req, res) => {
 // ============================================================
 router.post('/visas', async (req, res) => {
   const connection = await pool.getConnection();
+  let copiedFiles = [];
 
   try {
     await ensureVisaSchema();
@@ -294,6 +300,9 @@ router.post('/visas', async (req, res) => {
       visaPassword,
       visaAppointment,
       visaAppointmentDate,
+      studentId,
+      transferFromStudentId,
+      transferFromVisaId,
     } = req.body;
 
     if (!applicantName || !countryId || !visaType || !visaStatus) {
@@ -302,6 +311,17 @@ router.post('/visas', async (req, res) => {
         success: false,
         message: 'Student name, country, visa type, and visa status are required',
       });
+    }
+
+    let resolvedStudentId = studentId || transferFromStudentId || null;
+    if (!resolvedStudentId && transferFromVisaId) {
+      const [srcVisa] = await connection.query(
+        'SELECT student_id FROM visas WHERE id = ?',
+        [transferFromVisaId]
+      );
+      if (srcVisa.length > 0 && srcVisa[0].student_id) {
+        resolvedStudentId = srcVisa[0].student_id;
+      }
     }
 
     const visaIdCode = await generateVisaId(connection);
@@ -321,9 +341,10 @@ router.post('/visas', async (req, res) => {
         bank_statement_requirement, bank_statement_amount_required,
         accommodation_booked, visa_link, visa_website_id, visa_password,
         visa_appointment, visa_appointment_date)
-       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         visaIdCode,
+        resolvedStudentId || null,
         applicantName,
         applicantEmail || null,
         applicantPhone || null,
@@ -356,6 +377,25 @@ router.post('/visas', async (req, res) => {
       ]
     );
 
+    let transferredDocuments = 0;
+    if (transferFromStudentId) {
+      const transferResult = await transferStudentDocsToVisa(
+        connection,
+        transferFromStudentId,
+        result.insertId
+      );
+      copiedFiles = transferResult.copiedFiles;
+      transferredDocuments = transferResult.transferred;
+    } else if (transferFromVisaId) {
+      const transferResult = await transferVisaDocsToVisa(
+        connection,
+        transferFromVisaId,
+        result.insertId
+      );
+      copiedFiles = transferResult.copiedFiles;
+      transferredDocuments = transferResult.transferred;
+    }
+
     await connection.commit();
 
     res.status(201).json({
@@ -363,10 +403,12 @@ router.post('/visas', async (req, res) => {
       message: 'Visa created successfully',
       visaId: result.insertId,
       generatedVisaId: visaIdCode,
+      transferredDocuments,
     });
 
   } catch (error) {
     await connection.rollback();
+    cleanupCopiedFiles(copiedFiles);
     console.error('Error creating visa:', error);
     res.status(500).json({
       success: false,

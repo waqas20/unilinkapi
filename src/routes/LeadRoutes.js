@@ -1416,7 +1416,8 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       mobile: lead.phone || '',
       address: lead.address || '',
       country: countryFromLead,
-      course: lead.course || lead.program || '',
+      course: lead.course || '',
+      program: lead.program || '',
       source_inquiry: lead.referred_by || '',
       status: 'Active',
     };
@@ -1431,7 +1432,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
       address, postal_code, country,
       email, alternative_email,
       mobile, landline,
-      course, source_inquiry,
+      course, program, source_inquiry,
       status: studentStatus,
     } = mergedInfo;
 
@@ -1515,6 +1516,14 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           : JSON.stringify(lead.admission_tests))
       : null;
 
+    try {
+      await connection.query(`ALTER TABLE users ADD COLUMN program VARCHAR(100) NULL`);
+    } catch (err) {
+      if (!String(err.message || '').includes('Duplicate column')) {
+        console.warn('users.program ensure:', err.message);
+      }
+    }
+
     const [userResult] = await connection.query(
       `INSERT INTO users 
          (student_id, name, middle_name, surname,
@@ -1524,13 +1533,13 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
           nationality, marital_status, gender,
           dob, city_of_birth, country_of_birth,
           passport_no, passport_issue_date, passport_place_of_issue,
-          course, source_inquiry,
+          course, program, source_inquiry,
           payment_status,
           invoice_id,
           source_lead_id,
           admission_tests,
           password, plain_password, role, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId,
         name.trim(),
@@ -1553,6 +1562,7 @@ router.post('/leads/:leadId/register-student', async (req, res) => {
         formattedPassportDate,
         passport_place_of_issue?.trim() || null,
         course?.trim() || null,
+        program?.trim() || null,
         source_inquiry || null,
         leadPaymentStatus,
         invoiceId || null,

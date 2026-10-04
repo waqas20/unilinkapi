@@ -132,6 +132,7 @@ const ensureColumn = async (table, column, definition) => {
 const ensureIntendedProgramSchema = async () => {
   await ensureColumn('users', 'intake_session', 'VARCHAR(50) NULL');
   await ensureColumn('users', 'intake_year', 'VARCHAR(10) NULL');
+  await ensureColumn('users', 'program', 'VARCHAR(100) NULL');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS student_intended_programs (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -598,7 +599,7 @@ router.post('/students', async (req, res) => {
       cityOfBirth, countryOfBirth,
       passportNo, passportIssueDate, passportPlaceOfIssue,
       guardianName, guardianRelation, guardianMobile, guardianEmail,
-      sourceInquiry, course, status,
+      sourceInquiry, course, program, status,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards, notes,
       intendedPrograms, intakeSession, intakeYear, admissionTests,
@@ -650,9 +651,9 @@ router.post('/students', async (req, res) => {
        address, postal_code, country, dob, nationality, marital_status, gender,
        city_of_birth, country_of_birth, passport_no, passport_issue_date, passport_place_of_issue,
        guardian_name, guardian_relation, guardian_mobile, guardian_email,
-       source_inquiry, course, intake_session, intake_year, admission_tests,
+       source_inquiry, course, program, intake_session, intake_year, admission_tests,
        password, plain_password, role, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'client', ?)`,
       [
         studentId, firstName.trim(), middleName?.trim() || null, surname.trim(),
         trimmedEmail, alternativeEmail?.trim() || null,
@@ -666,7 +667,7 @@ router.post('/students', async (req, res) => {
         firstPassportPlaceOfIssue(passportNo, passportPlaceOfIssue),
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
-        sourceInquiry || null, course?.trim() || null,
+        sourceInquiry || null, course?.trim() || null, program?.trim() || null,
         intakeSession?.trim() || null, intakeYear ? String(intakeYear).trim() : null,
         admissionTestsJson,
         hashedPassword,
@@ -798,7 +799,7 @@ router.put('/students/:studentId', async (req, res) => {
       cityOfBirth, countryOfBirth,
       passportNo, passportIssueDate, passportPlaceOfIssue,
       guardianName, guardianRelation, guardianMobile, guardianEmail,
-      sourceInquiry, status, course,
+      sourceInquiry, status, course, program,
       emergencyContact, familyDetails,
       education, workExperience, activities, awards, notes,
       intendedPrograms, intakeSession, intakeYear, counselorIds,
@@ -837,7 +838,7 @@ router.put('/students/:studentId', async (req, res) => {
         city_of_birth = ?, country_of_birth = ?,
         passport_no = ?, passport_issue_date = ?, passport_place_of_issue = ?,
         guardian_name = ?, guardian_relation = ?, guardian_mobile = ?, guardian_email = ?,
-        source_inquiry = ?, status = ?, course = ?, intake_session = ?, intake_year = ?,
+        source_inquiry = ?, status = ?, course = ?, program = ?, intake_session = ?, intake_year = ?,
         admission_tests = ?
       WHERE id = ?`,
       [
@@ -853,7 +854,7 @@ router.put('/students/:studentId', async (req, res) => {
         firstPassportPlaceOfIssue(passportNo, passportPlaceOfIssue),
         guardianName?.trim() || null, guardianRelation?.trim() || null,
         guardianMobile?.trim() || null, guardianEmail?.trim() || null,
-        sourceInquiry || null, status || 'Active', course?.trim() || null,
+        sourceInquiry || null, status || 'Active', course?.trim() || null, program?.trim() || null,
         intakeSession?.trim() || null, intakeYear ? String(intakeYear).trim() : null,
         serializeAdmissionTests(admissionTests),
         studentId
