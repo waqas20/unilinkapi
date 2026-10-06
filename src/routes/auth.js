@@ -237,6 +237,165 @@ router.post('/login', async (req, res) => {
   }
 });
 
+const authenticateRequest = (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ success: false, message: 'Authentication required' });
+    return null;
+  }
+  try {
+    return jwt.verify(authHeader.substring(7), JWT_SECRET);
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      res.status(401).json({ success: false, message: 'Token expired. Please login again.' });
+    } else {
+      res.status(401).json({ success: false, message: 'Invalid token' });
+    }
+    return null;
+  }
+};
+
+// GET /auth/profile — current user profile
+router.get('/profile', async (req, res) => {
+  try {
+    const decoded = authenticateRequest(req, res);
+    if (!decoded) return;
+
+    const [users] = await pool.query(
+      'SELECT id, name, email, role, created_at FROM users WHERE id = ?',
+      [decoded.userId]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    res.json({ success: true, user: users[0] });
+  } catch (error) {
+    console.error('Error fetching profile:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load profile',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// PUT /auth/profile — update name, email, optional password (admin)
+router.put('/profile', async (req, res) => {
+  const decoded = authenticateRequest(req, res);
+  if (!decoded) return;
+
+  if (decoded.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Only administrators can update profile from this page'
+    });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const { name, email, password, currentPassword } = req.body;
+    const trimmedName = name?.trim();
+    const trimmedEmail = email?.trim()?.toLowerCase();
+
+    if (!trimmedName || !trimmedEmail) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Name and email are required' });
+    }
+
+    if (!validateEmail(trimmedEmail)) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Please provide a valid email address' });
+    }
+
+    if (trimmedName.length < 2) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Name must be at least 2 characters long' });
+    }
+
+    const [users] = await connection.query(
+      'SELECT id, name, email, password, role FROM users WHERE id = ?',
+      [decoded.userId]
+    );
+
+    if (users.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const current = users[0];
+
+    if (trimmedEmail !== current.email) {
+      const [dup] = await connection.query(
+        'SELECT id FROM users WHERE email = ? AND id != ?',
+        [trimmedEmail, decoded.userId]
+      );
+      if (dup.length > 0) {
+        await connection.rollback();
+        return res.status(409).json({ success: false, message: 'Email already in use' });
+      }
+    }
+
+    const updates = ['name = ?', 'email = ?'];
+    const params = [trimmedName, trimmedEmail];
+
+    if (password && String(password).trim()) {
+      if (String(password).length < 6) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+      }
+      if (!currentPassword) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Current password is required to set a new password'
+        });
+      }
+      const currentMatch = await bcrypt.compare(String(currentPassword), current.password);
+      if (!currentMatch) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+      }
+      const hashed = await bcrypt.hash(String(password), 10);
+      updates.push('password = ?');
+      params.push(hashed);
+      try {
+        await connection.query('UPDATE users SET plain_password = ? WHERE id = ?', [String(password), decoded.userId]);
+      } catch {
+        /* plain_password may not exist */
+      }
+    }
+
+    params.push(decoded.userId);
+    await connection.query(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, params);
+
+    const [updated] = await connection.query(
+      'SELECT id, name, email, role, created_at FROM users WHERE id = ?',
+      [decoded.userId]
+    );
+
+    await connection.commit();
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: updated[0]
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating profile:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update profile',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 // Verify token (optional - for checking if user is still authenticated)
 router.get('/verify', async (req, res) => {
   try {
