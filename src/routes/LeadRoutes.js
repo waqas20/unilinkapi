@@ -50,6 +50,11 @@ const validatePhone = (phone) => {
   return phoneRegex.test(phone) && phone.replace(/\D/g, '').length >= 10;
 };
 
+const REFERRED_BY_NAME_TRIGGERS = ['Friend or Family', 'Other', 'Person Name'];
+
+const requiresReferredByName = (referredBy) =>
+  REFERRED_BY_NAME_TRIGGERS.includes(String(referredBy || '').trim());
+
 const generatePassword = (length = 12) => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*';
   let password = '';
@@ -412,14 +417,18 @@ router.post('/leads', async (req, res) => {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
-    if (String(referredBy || '').trim() === 'Person Name' && !referredByName?.trim()) {
+    if (requiresReferredByName(referredBy) && !referredByName?.trim()) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Referred By (Name) is required when Person Name is selected' });
+      return res.status(400).json({
+        success: false,
+        message: 'Referred By (Name) is required when Friend or Family or Other is selected'
+      });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedName = fullName.trim();
     const trimmedPhone = phone.trim();
+   
 
     if (!validateEmail(trimmedEmail)) {
       await connection.rollback();
@@ -1040,14 +1049,18 @@ router.put('/leads/:leadId', async (req, res) => {
       await connection.rollback();
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
-    if (String(referredBy || '').trim() === 'Person Name' && !referredByName?.trim()) {
+    if (requiresReferredByName(referredBy) && !referredByName?.trim()) {
       await connection.rollback();
-      return res.status(400).json({ success: false, message: 'Referred By (Name) is required when Person Name is selected' });
+      return res.status(400).json({
+        success: false,
+        message: 'Referred By (Name) is required when Friend or Family or Other is selected'
+      });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
     const trimmedName = fullName.trim();
     const trimmedPhone = phone.trim();
+   
 
     if (!validateEmail(trimmedEmail)) {
       await connection.rollback();
