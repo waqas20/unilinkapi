@@ -122,6 +122,63 @@ const ensureApplicationSchema = async () => {
       INDEX idx_application_documents_app (application_id)
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS application_references (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      application_id INT NOT NULL,
+      referee_name VARCHAR(255) NULL,
+      contact_no VARCHAR(100) NULL,
+      email_id VARCHAR(255) NULL,
+      designation VARCHAR(255) NULL,
+      organization_name VARCHAR(255) NULL,
+      organization_address TEXT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_application_references_app (application_id)
+    )
+  `);
+};
+
+const normalizeReferences = (references) => {
+  if (!Array.isArray(references)) return [];
+  return references
+    .map((ref) => ({
+      refereeName: (ref.refereeName ?? ref.referee_name ?? '').toString().trim(),
+      contactNo: (ref.contactNo ?? ref.contact_no ?? '').toString().trim(),
+      emailId: (ref.emailId ?? ref.email_id ?? '').toString().trim(),
+      designation: (ref.designation ?? '').toString().trim(),
+      organizationName: (ref.organizationName ?? ref.organization_name ?? '').toString().trim(),
+      organizationAddress: (ref.organizationAddress ?? ref.organization_address ?? '').toString().trim(),
+    }))
+    .filter((ref) =>
+      ref.refereeName ||
+      ref.contactNo ||
+      ref.emailId ||
+      ref.designation ||
+      ref.organizationName ||
+      ref.organizationAddress
+    );
+};
+
+const saveApplicationReferences = async (connection, applicationId, references) => {
+  await connection.query('DELETE FROM application_references WHERE application_id = ?', [applicationId]);
+  const rows = normalizeReferences(references);
+  for (const ref of rows) {
+    await connection.query(
+      `INSERT INTO application_references
+       (application_id, referee_name, contact_no, email_id, designation, organization_name, organization_address)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        applicationId,
+        ref.refereeName || null,
+        ref.contactNo || null,
+        ref.emailId || null,
+        ref.designation || null,
+        ref.organizationName || null,
+        ref.organizationAddress || null,
+      ]
+    );
+  }
 };
 
 const INTAKE_SELECT = `COALESCE(NULLIF(a.intake, ''), i.intake_name) as intake_name`;
@@ -293,12 +350,28 @@ router.get('/applications/:applicationId', async (req, res) => {
     if (applications.length === 0) return res.status(404).json({ success: false, message: 'Application not found' });
     const app = applications[0];
     const fullName = app.student_display_name || app.student_name;
+
+    let references = [];
+    try {
+      const [refRows] = await pool.query(
+        `SELECT id, referee_name, contact_no, email_id, designation, organization_name, organization_address
+         FROM application_references
+         WHERE application_id = ?
+         ORDER BY id ASC`,
+        [applicationId]
+      );
+      references = refRows;
+    } catch (err) {
+      console.warn('application_references fetch:', err.message);
+    }
+
     res.json({
       success: true,
       application: {
         ...app,
         student_name: fullName,
         student_full_name: fullName,
+        references,
       },
     });
     return;
@@ -400,6 +473,8 @@ router.post('/applications', async (req, res) => {
     );
     copiedFiles = transferResult.copiedFiles;
 
+    await saveApplicationReferences(connection, result.insertId, req.body.references);
+
     await connection.commit();
     res.status(201).json({
       success: true,
@@ -482,6 +557,8 @@ router.put('/applications/:applicationId', async (req, res) => {
       ]
     );
 
+    await saveApplicationReferences(connection, applicationId, req.body.references);
+
     await connection.commit();
     res.json({ success: true, message: 'Application updated successfully' });
 
@@ -526,6 +603,12 @@ router.delete('/applications/:applicationId', async (req, res) => {
       await connection.query('DELETE FROM application_documents WHERE application_id = ?', [applicationId]);
     } catch (err) {
       console.warn('application_documents cleanup:', err.message);
+    }
+
+    try {
+      await connection.query('DELETE FROM application_references WHERE application_id = ?', [applicationId]);
+    } catch (err) {
+      console.warn('application_references cleanup:', err.message);
     }
 
     await connection.query('DELETE FROM applications WHERE id = ?', [applicationId]);
